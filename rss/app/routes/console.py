@@ -950,88 +950,105 @@ async def upload_sandbox_json(file: UploadFile = File(...), user=Depends(get_cur
 
 @router.get("/sandbox/history-samples")
 async def get_history_samples(user=Depends(get_current_user)):
+    """从数据库获取频道消息统计，替代旧版 JSON 文件读取"""
     require_auth(user)
-    import json
-    import os
-    file_path = "scratch/messages_dump.json"
-    if not os.path.exists(file_path):
-        return {"status": "error", "message": "未找到抓取的数据文件，请先上传 JSON 本地数据。"}
+    from sqlalchemy import func
+    from models.models import ForwardedMessage
+    db = get_session()
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {"status": "error", "message": "加载数据失败: JSON 数据格式不符合预期（应为以频道链接为键的字典对象）。"}
+        # 按 source_chat_id 分组统计
+        stats = db.query(
+            ForwardedMessage.source_chat_id,
+            ForwardedMessage.source_chat_name,
+            func.count(ForwardedMessage.id).label('msg_count')
+        ).filter(
+            ForwardedMessage.message_text.isnot(None)
+        ).group_by(
+            ForwardedMessage.source_chat_id,
+            ForwardedMessage.source_chat_name
+        ).all()
+
+        if not stats:
+            return {"status": "error", "message": "数据库中暂无消息数据。请先运行 backfill_messages.py 回填历史数据。"}
+
         result = []
-        for link, info in data.items():
-            if not isinstance(info, dict):
-                continue
-            msgs = [
-                {"id": m.get("id"), "date": m.get("date"), "summary": m.get("text", "")[:40]}
-                for m in info.get("messages", []) if m.get("text")
+        for source_id, source_name, count in stats:
+            # 取最近 10 条作为样本
+            samples_q = db.query(ForwardedMessage).filter(
+                ForwardedMessage.source_chat_id == source_id,
+                ForwardedMessage.message_text.isnot(None)
+            ).order_by(ForwardedMessage.message_date.desc()).limit(10).all()
+
+            samples = [
+                {"id": m.telegram_message_id, "date": m.message_date.isoformat() if m.message_date else "", "summary": (m.message_text or "")[:40]}
+                for m in samples_q
             ]
             result.append({
-                "channel_link": link,
-                "channel_name": info.get("channel_name", link),
-                "message_count": len(msgs),
-                "samples": msgs[:10]
+                "channel_link": source_id,
+                "channel_name": source_name or source_id,
+                "message_count": count,
+                "samples": samples
             })
+
+        # 按消息数量降序排列
+        result.sort(key=lambda x: x["message_count"], reverse=True)
         return {"status": "success", "data": result}
     except Exception as e:
-        return {"status": "error", "message": f"加载数据失败: {str(e)}"}
+        logger.error(f"获取频道消息统计失败: {e}")
+        return {"status": "error", "message": f"查询数据库失败: {str(e)}"}
+    finally:
+        db.close()
 
 
 @router.post("/sandbox/aggregate-messages")
 async def aggregate_messages(data: Dict, user=Depends(get_current_user)):
+    """从数据库聚合消息，替代旧版 JSON 文件读取"""
     require_auth(user)
-    import json
-    import os
     from datetime import datetime, timezone, timedelta
-    
+    from models.models import ForwardedMessage
+
     channels = data.get("channels", [])
     days = int(data.get("days", 1))
-    
-    file_path = "scratch/messages_dump.json"
-    if not os.path.exists(file_path):
-        return {"status": "error", "message": "未找到抓取的数据文件。"}
-        
+
+    db = get_session()
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            dump_data = json.load(f)
-            
         time_limit = datetime.now(timezone.utc) - timedelta(days=days)
+
+        # 查询指定频道、指定时间范围内的消息
+        messages = db.query(ForwardedMessage).filter(
+            ForwardedMessage.source_chat_id.in_(channels),
+            ForwardedMessage.message_date >= time_limit,
+            ForwardedMessage.message_text.isnot(None)
+        ).order_by(
+            ForwardedMessage.source_chat_id,
+            ForwardedMessage.message_date.desc()
+        ).all()
+
+        if not messages:
+            return {"status": "success", "text": f"在过去 {days} 天内未找到所选频道的消息。"}
+
+        # 按频道分组
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for m in messages:
+            grouped[m.source_chat_id].append(m)
+
         aggregated_texts = []
-        
-        for ch_link in channels:
-            ch_info = dump_data.get(ch_link)
-            if not ch_info:
-                continue
-            ch_name = ch_info.get("channel_name", ch_link)
-            
-            msgs = []
-            for m in ch_info.get("messages", []):
-                m_date_str = m.get("date")
-                if not m_date_str:
-                    continue
-                try:
-                    m_date = datetime.fromisoformat(m_date_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-                    if m_date >= time_limit:
-                        msgs.append(m)
-                except Exception:
-                    pass
-                    
-            if msgs:
-                aggregated_texts.append(f"=== 频道: {ch_name} (共 {len(msgs)} 条消息) ===")
-                for m in msgs:
-                    aggregated_texts.append(f"[{m.get('date', '')}] ID {m.get('id')}: {m.get('text', '')}")
-                aggregated_texts.append("\n")
-                
+        for ch_id, msgs in grouped.items():
+            ch_name = msgs[0].source_chat_name or ch_id
+            aggregated_texts.append(f"=== 频道: {ch_name} (共 {len(msgs)} 条消息) ===")
+            for m in msgs:
+                date_str = m.message_date.isoformat() if m.message_date else ""
+                aggregated_texts.append(f"[{date_str}] ID {m.telegram_message_id}: {m.message_text}")
+            aggregated_texts.append("\n")
+
         combined_text = "\n".join(aggregated_texts)
-        return {
-            "status": "success", 
-            "text": combined_text or "在选定时间窗口内未找到任何消息。"
-        }
+        return {"status": "success", "text": combined_text}
     except Exception as e:
+        logger.error(f"聚合消息失败: {e}")
         return {"status": "error", "message": f"聚合消息失败: {str(e)}"}
+    finally:
+        db.close()
 
 
 @router.post("/sandbox/analyze-channels")
