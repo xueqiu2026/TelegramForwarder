@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, errors
 from ai import get_ai_provider
 import traceback
-from utils.constants import DEFAULT_TIMEZONE, DEFAULT_AI_MODEL, DEFAULT_SUMMARY_PROMPT
+from utils.constants import DEFAULT_TIMEZONE, DEFAULT_AI_MODEL, DEFAULT_SUMMARY_PROMPT, WRITING_PROMPT_B, WRITING_PROMPT_D
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +271,59 @@ class SummaryScheduler:
                 await self._send_domestic_push_aggregated(target_chat_id_str, summary)
             except Exception as push_err:
                 logger.error(f"发送国内推送时出错: {str(push_err)}")
+
+            # 8.5 [P8] 写作 Prompt 自动推送（推文工厂 + 信息差猎手）
+            writing_prompts = [
+                ("🐦 推文工厂", WRITING_PROMPT_B),
+                ("🏹 信息差快报", WRITING_PROMPT_D),
+            ]
+            for wp_name, wp_prompt in writing_prompts:
+                try:
+                    async with self.request_semaphore:
+                        wp_provider = await get_ai_provider(ai_model)
+                        wp_result = await wp_provider.process_message(
+                            combined_text,
+                            prompt=wp_prompt,
+                            model=ai_model
+                        )
+                    if wp_result:
+                        wp_parts = self._split_message(wp_result, MAX_MESSAGE_PART_LENGTH)
+                        for wi, wp_part in enumerate(wp_parts):
+                            if wi == 0:
+                                wp_msg = f"✍️ 【{wp_name}】\n\n" + wp_part
+                            else:
+                                wp_msg = f"✍️ 【{wp_name}】(续 {wi+1}/{len(wp_parts)})\n\n" + wp_part
+
+                            wp_attempt = 0
+                            wp_use_md = True
+                            while wp_attempt < MAX_SEND_ATTEMPTS:
+                                try:
+                                    if wp_use_md:
+                                        await self.bot_client.send_message(
+                                            target_chat_id_int, wp_msg, parse_mode='markdown'
+                                        )
+                                    else:
+                                        await self.bot_client.send_message(
+                                            target_chat_id_int, wp_msg
+                                        )
+                                    break
+                                except errors.MarkupInvalidError:
+                                    if wp_use_md:
+                                        wp_use_md = False
+                                        continue
+                                    raise
+                                except errors.FloodWaitError as fwe:
+                                    await asyncio.sleep(fwe.seconds)
+                                    wp_attempt += 1
+                                except Exception:
+                                    wp_attempt += 1
+                                    await asyncio.sleep(1)
+
+                        logger.info(f"目标群组 {target_chat_id} 写作推送 [{wp_name}] 发送成功")
+                    else:
+                        logger.warning(f"目标群组 {target_chat_id} 写作推送 [{wp_name}] AI 返回为空")
+                except Exception as wp_err:
+                    logger.error(f"写作推送 [{wp_name}] 失败: {str(wp_err)}")
 
             # 9. 标记已总结
             message_ids = [msg.id for msg in messages]
