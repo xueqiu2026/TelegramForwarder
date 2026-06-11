@@ -10,7 +10,7 @@ class ClaudeProvider(BaseAIProvider):
     def __init__(self):
         self.client = None
         self.model = None
-        self.default_model = 'claude-3-5-sonnet-latest'
+        self.default_model = 'claude-fable-5'
         
     async def initialize(self, **kwargs):
         """初始化Claude客户端"""

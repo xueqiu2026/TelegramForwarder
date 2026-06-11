@@ -11,7 +11,7 @@ class OpenAIProvider(OpenAIBaseProvider):
     def __init__(self):
         super().__init__(
             env_prefix='OPENAI',
-            default_model='gpt-4o-mini',
+            default_model='gpt-5.4',
             default_api_base='https://api.openai.com/v1'
         )
 

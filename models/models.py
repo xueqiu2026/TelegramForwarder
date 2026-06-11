@@ -1,5 +1,7 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Enum, UniqueConstraint, inspect, text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Enum, UniqueConstraint, inspect, text, DateTime
 from sqlalchemy.ext.declarative import declarative_base
+import datetime
+
 from sqlalchemy.orm import relationship, sessionmaker
 from enums.enums import ForwardMode, PreviewMode, MessageMode, AddMode, HandleMode
 import logging
@@ -66,7 +68,7 @@ class ForwardRule(Base):
     ai_prompt = Column(String, nullable=True)  # AI处理的prompt
     enable_ai_upload_image = Column(Boolean, default=False)  # 是否启用AI图片上传功能
     is_summary = Column(Boolean, default=False)  # 是否启用AI总结
-    summary_time = Column(String(5), default=os.getenv('DEFAULT_SUMMARY_TIME', '07:00'))
+    summary_time = Column(String(50), default=os.getenv('DEFAULT_SUMMARY_TIME', '07:00'))
     summary_prompt = Column(String, nullable=True)  # AI总结的prompt
     is_keyword_after_ai = Column(Boolean, default=False) # AI处理后是否再次执行关键字过滤
     is_top_summary = Column(Boolean, default=True) # 是否顶置总结消息
@@ -76,6 +78,7 @@ class ForwardRule(Base):
     only_rss = Column(Boolean, default=False)  # 是否只转发RSS
     # 同步功能相关
     enable_sync = Column(Boolean, default=False)  # 是否启用规则同步功能
+    enable_forward = Column(Boolean, default=True)  # 是否启用实时直转发
 
     # 添加唯一约束
     __table_args__ = (
@@ -92,6 +95,7 @@ class ForwardRule(Base):
     rss_config = relationship('RSSConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
     rule_syncs = relationship('RuleSync', back_populates='rule', cascade="all, delete-orphan")
     push_config = relationship('PushConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
+    forwarded_messages = relationship('ForwardedMessage', back_populates='rule', cascade="all, delete-orphan")
 
 class Keyword(Base):
     __tablename__ = 'keywords'
@@ -232,6 +236,43 @@ class User(Base):
     username = Column(String, nullable=False)  
     password = Column(String, nullable=False)  
 
+class SummaryHistory(Base):
+    __tablename__ = 'summary_history'
+
+    id = Column(Integer, primary_key=True)
+    rule_id = Column(Integer, ForeignKey('forward_rules.id'), nullable=True)  # 聚合总结时为 None
+    source_channel_name = Column(String, nullable=True)
+    summary_text = Column(String, nullable=False)
+    message_count = Column(Integer, nullable=True)
+    time_range_start = Column(DateTime, nullable=True)
+    time_range_end = Column(DateTime, nullable=True)
+    ai_model = Column(String, nullable=True)
+    prompt_used = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    target_chat_id = Column(String, nullable=True)     # 目标群组 ID
+    source_count = Column(Integer, nullable=True)       # 涉及的源频道数量
+
+    # 关系
+    rule = relationship('ForwardRule', foreign_keys=[rule_id])
+
+class ForwardedMessage(Base):
+    """转发消息记录表，用于聚合总结"""
+    __tablename__ = 'forwarded_messages'
+
+    id = Column(Integer, primary_key=True)
+    rule_id = Column(Integer, ForeignKey('forward_rules.id', ondelete='CASCADE'), nullable=False)
+    source_chat_id = Column(String, nullable=False)       # 源频道 telegram_chat_id
+    source_chat_name = Column(String, nullable=True)       # 源频道名称（冗余）
+    target_chat_id = Column(String, nullable=False)        # 目标群组 telegram_chat_id
+    telegram_message_id = Column(Integer, nullable=True)   # 源频道中的消息 ID
+    message_text = Column(String, nullable=True)           # 原始消息文本
+    has_media = Column(Boolean, default=False)             # 是否包含媒体
+    message_date = Column(DateTime, nullable=False)        # 源频道原始发送时间 (UTC)
+    forwarded_at = Column(DateTime, default=datetime.datetime.utcnow)
+    is_summarized = Column(Boolean, default=False)         # 是否已被总结
+
+    rule = relationship('ForwardRule', back_populates='forwarded_messages')
+
 def migrate_db(engine):
     """数据库迁移函数，确保新字段的添加"""
     inspector = inspect(engine)
@@ -244,6 +285,39 @@ def migrate_db(engine):
         
     try:
         with engine.connect() as connection:
+
+            # 如果 forwarded_messages 表不存在，创建表
+            if 'forwarded_messages' not in existing_tables:
+                logging.info("创建 forwarded_messages 表...")
+                ForwardedMessage.__table__.create(engine)
+
+            # summary_history 表新增列
+            if 'summary_history' in existing_tables:
+                sh_columns = {col['name'] for col in inspector.get_columns('summary_history')}
+                if 'target_chat_id' not in sh_columns:
+                    connection.execute(text(
+                        "ALTER TABLE summary_history ADD COLUMN target_chat_id VARCHAR DEFAULT NULL"
+                    ))
+                    logging.info("已添加 summary_history.target_chat_id 列")
+                if 'source_count' not in sh_columns:
+                    connection.execute(text(
+                        "ALTER TABLE summary_history ADD COLUMN source_count INTEGER DEFAULT NULL"
+                    ))
+                    logging.info("已添加 summary_history.source_count 列")
+                # rule_id 改为可空（PostgreSQL）
+                if engine.name == 'postgresql':
+                    try:
+                        connection.execute(text(
+                            "ALTER TABLE summary_history ALTER COLUMN rule_id DROP NOT NULL"
+                        ))
+                        logging.info("已将 summary_history.rule_id 改为可空")
+                    except Exception:
+                        pass  # 已经是可空则忽略
+
+            # 如果summary_history表不存在，创建表
+            if 'summary_history' not in existing_tables:
+                logging.info("创建summary_history表...")
+                SummaryHistory.__table__.create(engine)
 
             # 如果rule_syncs表不存在，创建表
             if 'rule_syncs' not in existing_tables:
@@ -365,6 +439,7 @@ def migrate_db(engine):
         'enable_only_push': 'ALTER TABLE forward_rules ADD COLUMN enable_only_push BOOLEAN DEFAULT FALSE',
         'media_allow_text': 'ALTER TABLE forward_rules ADD COLUMN media_allow_text BOOLEAN DEFAULT FALSE',
         'enable_ai_upload_image': 'ALTER TABLE forward_rules ADD COLUMN enable_ai_upload_image BOOLEAN DEFAULT FALSE',
+        'enable_forward': 'ALTER TABLE forward_rules ADD COLUMN enable_forward BOOLEAN DEFAULT TRUE',
     }
 
     keywords_new_columns = {
@@ -400,17 +475,19 @@ def migrate_db(engine):
 
         # 修改keywords表的唯一约束
         try:
-            with engine.connect() as connection:
-                # 检查索引是否存在
-                result = connection.execute(text("""
-                    SELECT name FROM sqlite_master 
-                    WHERE type='index' AND name='unique_rule_keyword_is_regex_is_blacklist'
-                """))
-                index_exists = result.fetchone() is not None
-                if not index_exists:
-                    logging.info('开始更新 keywords 表的唯一约束...')
+            indexes = inspector.get_indexes('keywords')
+            index_exists = any(idx['name'] == 'unique_rule_keyword_is_regex_is_blacklist' for idx in indexes)
+            if not index_exists:
+                logging.info('开始更新 keywords 表的唯一约束...')
+                if engine.name == 'postgresql':
+                    with engine.begin() as connection:
+                        connection.execute(text("""
+                            CREATE UNIQUE INDEX unique_rule_keyword_is_regex_is_blacklist 
+                            ON keywords (rule_id, keyword, is_regex, is_blacklist)
+                        """))
+                        logging.info('PostgreSQL: 添加唯一约束 unique_rule_keyword_is_regex_is_blacklist 成功')
+                else:
                     try:
-                        
                         with engine.begin() as connection:
                             # 创建临时表
                             connection.execute(text("""
@@ -420,7 +497,6 @@ def migrate_db(engine):
                                     keyword TEXT,
                                     is_regex BOOLEAN,
                                     is_blacklist BOOLEAN
-                                    -- 如果 keywords 表还有其他字段，请在这里一并定义
                                 )
                             """))
                             logging.info('创建 keywords_temp 表结构成功')
@@ -445,13 +521,13 @@ def migrate_db(engine):
                                 CREATE UNIQUE INDEX unique_rule_keyword_is_regex_is_blacklist 
                                 ON keywords (rule_id, keyword, is_regex, is_blacklist)
                             """))
-                            logging.info('添加唯一约束 unique_rule_keyword_is_regex_is_blacklist 成功')
+                            logging.info('SQLite: 添加唯一约束 unique_rule_keyword_is_regex_is_blacklist 成功')
 
                             logging.info('成功更新 keywords 表结构和唯一约束')
                     except Exception as e:
                         logging.error(f'更新 keywords 表结构时出错: {str(e)}')
-                else:
-                    logging.info('唯一约束已存在，跳过创建')
+            else:
+                logging.info('唯一约束已存在，跳过创建')
 
         except Exception as e:
             logging.error(f'更新唯一约束时出错: {str(e)}')
@@ -459,9 +535,13 @@ def migrate_db(engine):
 
 def init_db():
     """初始化数据库"""
-    # 创建数据库文件夹
-    os.makedirs('./db', exist_ok=True)
-    engine = create_engine('sqlite:///./db/forward.db')
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL 环境变量未设置")
+    # 仅 SQLite 时创建文件夹
+    if DATABASE_URL.startswith('sqlite'):
+        os.makedirs('./db', exist_ok=True)
+    engine = create_engine(DATABASE_URL)
 
     # 首先创建所有表
     Base.metadata.create_all(engine)
@@ -473,7 +553,10 @@ def init_db():
 
 def get_session():
     """创建会话工厂"""
-    engine = create_engine('sqlite:///./db/forward.db')
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL 环境变量未设置")
+    engine = create_engine(DATABASE_URL)
     Session = sessionmaker(bind=engine)
     return Session()
 

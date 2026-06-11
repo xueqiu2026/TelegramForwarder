@@ -15,7 +15,7 @@ class GeminiOpenAIProvider(OpenAIBaseProvider):
     def __init__(self):
         super().__init__(
             env_prefix='GEMINI',
-            default_model='gemini-pro',
+            default_model='gemini-3.5-flash',
             default_api_base=''  # API_BASE必须在环境变量中提供
         )
 
@@ -46,7 +46,7 @@ class GeminiProvider(BaseAIProvider):
             self.model_name = kwargs.get('model')
         
         if not self.model_name:  # 如果kwargs中也没有model
-            self.model_name = 'gemini-pro'  # 最后才使用默认值
+            self.model_name = 'gemini-3.5-flash'  # 最后才使用默认值
             
         logger.info(f"初始化Gemini模型: {self.model_name}")
         

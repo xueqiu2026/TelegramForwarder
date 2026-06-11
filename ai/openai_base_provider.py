@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 class OpenAIBaseProvider(BaseAIProvider):
-    def __init__(self, env_prefix: str = 'OPENAI', default_model: str = 'gpt-4o-mini',
+    def __init__(self, env_prefix: str = 'OPENAI', default_model: str = 'gpt-5.4',
                  default_api_base: str = 'https://api.openai.com/v1'):
         """
         初始化基础OpenAI格式提供者

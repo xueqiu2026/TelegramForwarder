@@ -2,7 +2,6 @@ from .base import BaseAIProvider
 from .openai_provider import OpenAIProvider
 from .gemini_provider import GeminiProvider
 from .deepseek_provider import DeepSeekProvider
-from .qwen_provider import QwenProvider
 from .grok_provider import GrokProvider
 from .claude_provider import ClaudeProvider
 import os
@@ -28,14 +27,12 @@ async def get_ai_provider(model=None):
     for provider_name, models_list in providers_config.items():
         # 检查完全匹配
         if model in models_list:
-            if provider_name == "openai":
+            if provider_name in ("openai", "gpt"):
                 provider = OpenAIProvider()
             elif provider_name == "gemini":
                 provider = GeminiProvider()
             elif provider_name == "deepseek":
                 provider = DeepSeekProvider()
-            elif provider_name == "qwen":
-                provider = QwenProvider()
             elif provider_name == "grok":
                 provider = GrokProvider()
             elif provider_name == "claude":
@@ -53,7 +50,6 @@ __all__ = [
     'OpenAIProvider',
     'GeminiProvider',
     'DeepSeekProvider',
-    'QwenProvider',
     'GrokProvider',
     'ClaudeProvider',
     'get_ai_provider'

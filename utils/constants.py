@@ -41,7 +41,7 @@ RSS_DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, RSS_DATA_PATH)
                             else RSS_DATA_PATH)
 
 # 默认AI模型
-DEFAULT_AI_MODEL = os.getenv('DEFAULT_AI_MODEL', 'gpt-4o')
+DEFAULT_AI_MODEL = os.getenv('DEFAULT_AI_MODEL', 'gpt-5.5')
 # 默认AI总结提示词
 DEFAULT_SUMMARY_PROMPT = os.getenv('DEFAULT_SUMMARY_PROMPT', '请总结以下频道/群组24小时内的消息。')
 # 默认AI提示词

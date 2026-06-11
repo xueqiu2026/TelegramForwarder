@@ -10,6 +10,7 @@ from telethon.tl.types import ChannelParticipantsAdmins
 from managers.state_manager import state_manager
 from telethon.tl import types
 from filters.process import process_forward_rule
+from utils.message_logger import log_forwarded_message
 # 加载环境变量
 load_dotenv()
 
@@ -150,6 +151,15 @@ async def handle_user_message(event, user_client, bot_client):
             if not rule.enable_rule:
                 logger.info(f'规则 {rule.id} 未启用')
                 continue
+            
+            # 实时转发拦截点
+            if not getattr(rule, 'enable_forward', True):
+                logger.info(f'规则 {rule.id} 已关闭即时转发，跳过发送')
+                # 即使不转发，启用了总结的规则仍需落库
+                if getattr(rule, 'is_summary', False):
+                    log_forwarded_message(rule, event)
+                continue
+                
             logger.info(f'处理转发规则 ID: {rule.id} (从 {source_chat.name} 转发到: {target_chat.name})')
             if rule.use_bot:
                 # 直接使用过滤器模块中的process_forward_rule函数

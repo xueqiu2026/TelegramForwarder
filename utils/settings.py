@@ -50,7 +50,7 @@ def load_ai_models(type="list"):
         return AI_MODELS_CONFIG
     
     # 默认返回模型列表
-    return ["gpt-3.5-turbo", "gemini-1.5-flash", "claude-3-sonnet"]
+    return ["gpt-5.5", "gemini-3.5-flash", "claude-fable-5"]
 
 def load_summary_times():
     """加载总结时间列表"""

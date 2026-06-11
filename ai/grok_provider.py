@@ -10,6 +10,6 @@ class GrokProvider(OpenAIBaseProvider):
     def __init__(self):
         super().__init__(
             env_prefix='GROK',
-            default_model='grok-2-latest',
+            default_model='grok-4.3-latest',
             default_api_base='https://api.x.ai/v1'
         )
