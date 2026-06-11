@@ -91,6 +91,24 @@ async def get_me(user=Depends(get_current_user)):
     return {"username": user.username}
 
 
+@router.post("/trigger-summary-now")
+async def trigger_summary_now(user=Depends(get_current_user)):
+    """手动触发一次聚合总结（含写作推送），用于测试"""
+    require_auth(user)
+    try:
+        import sys
+        main_module = sys.modules.get('__main__') or sys.modules.get('main')
+        scheduler = getattr(main_module, 'scheduler', None) if main_module else None
+        if not scheduler:
+            return {"status": "error", "message": "调度器未初始化，请确认主服务已完全启动"}
+        # 使用 rule_id=1 触发
+        asyncio.create_task(scheduler._execute_summary(1, is_now=True))
+        return {"status": "success", "message": "已触发手动总结，预计 1-2 分钟后推送到目标群组"}
+    except Exception as e:
+        logger.error(f"手动触发总结失败: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 # ══════════════════════════════════════════════════════════════════════
 # WebSocket 连接管理器
 # ══════════════════════════════════════════════════════════════════════
