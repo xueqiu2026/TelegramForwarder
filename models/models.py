@@ -70,6 +70,8 @@ class ForwardRule(Base):
     is_summary = Column(Boolean, default=False)  # 是否启用AI总结
     summary_time = Column(String(50), default=os.getenv('DEFAULT_SUMMARY_TIME', '07:00'))
     summary_prompt = Column(String, nullable=True)  # AI总结的prompt
+    summary_prompt_b = Column(String, nullable=True)  # 早安老铁(推文工厂) Prompt
+    summary_prompt_d = Column(String, nullable=True)  # 信息差快报 Prompt
     is_keyword_after_ai = Column(Boolean, default=False) # AI处理后是否再次执行关键字过滤
     is_top_summary = Column(Boolean, default=True) # 是否顶置总结消息
     enable_delay = Column(Boolean, default=False)  # 是否启用延迟处理
@@ -440,14 +442,16 @@ def migrate_db(engine):
         'media_allow_text': 'ALTER TABLE forward_rules ADD COLUMN media_allow_text BOOLEAN DEFAULT FALSE',
         'enable_ai_upload_image': 'ALTER TABLE forward_rules ADD COLUMN enable_ai_upload_image BOOLEAN DEFAULT FALSE',
         'enable_forward': 'ALTER TABLE forward_rules ADD COLUMN enable_forward BOOLEAN DEFAULT TRUE',
+        'summary_prompt_b': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt_b VARCHAR DEFAULT NULL',
+        'summary_prompt_d': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt_d VARCHAR DEFAULT NULL',
     }
 
     keywords_new_columns = {
         'is_blacklist': 'ALTER TABLE keywords ADD COLUMN is_blacklist BOOLEAN DEFAULT TRUE',
     }
 
-    # 添加缺失的列
-    with engine.connect() as connection:
+    # 添加缺失的列（使用 engine.begin() 确保 DDL 自动 commit）
+    with engine.begin() as connection:
         # 添加forward_rules表的列
         for column, sql in forward_rules_new_columns.items():
             if column not in forward_rules_columns:

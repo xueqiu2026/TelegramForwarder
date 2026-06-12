@@ -12,6 +12,11 @@ export interface Chat {
   name: string
 }
 
+export interface ChatDetail extends Chat {
+  source_rule_count: number
+  target_rule_count: number
+}
+
 export interface RuleListItem {
   id: number
   source_chat_id: number
@@ -54,6 +59,8 @@ export interface RuleDetail {
   is_summary: boolean
   summary_time: string | null
   summary_prompt: string | null
+  summary_prompt_b?: string | null
+  summary_prompt_d?: string | null
   is_keyword_after_ai: boolean
   is_top_summary: boolean
   // 其他

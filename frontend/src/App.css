@@ -212,3 +212,22 @@
 
 /* Cursor fix for nav */
 .nav-item { cursor: pointer; }
+
+/* Rule delete button hover effect */
+.rule-list-item-container {
+  position: relative;
+}
+
+.rule-list-item-container .delete-rule-btn {
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.rule-list-item-container:hover .delete-rule-btn {
+  opacity: 0.6;
+}
+
+.rule-list-item-container:hover .delete-rule-btn:hover {
+  opacity: 1;
+  color: var(--color-danger);
+}

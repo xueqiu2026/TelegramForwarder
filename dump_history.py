@@ -60,8 +60,8 @@ async def main():
             with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
                 all_data = json.load(f)
             print(f"载入已存在的数据文件，已抓取 {len(all_data)} 个频道的数据。")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"载入已存在的数据文件失败，将重新开始抓取: {repr(e)}")
             
     channels = get_source_channels()
     print(f"\n开始抓取历史消息，共 {len(channels)} 个频道...")

@@ -39,6 +39,7 @@ db_ops = None
 
 scheduler = None
 chat_updater = None
+internal_runner = None
 
 
 async def init_db_ops():
@@ -47,6 +48,67 @@ async def init_db_ops():
     if db_ops is None:
         db_ops = await DBOperations.create()
     return db_ops
+
+
+async def start_internal_server(user_client, bot_client):
+    global internal_runner
+    from aiohttp import web
+    app = web.Application()
+    
+    async def resolve_handler(request):
+        try:
+            data = await request.json()
+            link = data.get("link")
+            if not link:
+                return web.json_response({"status": "error", "message": "解析链接或用户名不能为空"}, status=400)
+            
+            # 清洗并转换 ID 格式
+            link_clean = link.strip() if isinstance(link, str) else link
+            if isinstance(link_clean, str):
+                if (link_clean.startswith('-') and link_clean[1:].isdigit()) or link_clean.isdigit():
+                    link_clean = int(link_clean)
+            
+            # 使用 user_client 获取实体
+            entity = await user_client.get_entity(link_clean)
+            
+            # 获取最合适的展示名
+            if hasattr(entity, 'title'):
+                title = entity.title
+            elif hasattr(entity, 'first_name'):
+                title = f"{entity.first_name} {entity.last_name}" if hasattr(entity, 'last_name') and entity.last_name else entity.first_name
+            else:
+                title = "Private Chat"
+                
+            return web.json_response({
+                "status": "success",
+                "telegram_chat_id": str(entity.id),
+                "name": title
+            })
+        except Exception as e:
+            logger.error(f"内部解析服务处理错误: {str(e)}")
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+            
+    async def health_handler(request):
+        try:
+            user_ok = user_client.is_connected() if user_client else False
+            bot_ok = bot_client.is_connected() if bot_client else False
+            return web.json_response({
+                "status": "success",
+                "user_client_connected": user_ok,
+                "bot_client_connected": bot_ok
+            })
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+    app.router.add_post("/resolve", resolve_handler)
+    app.router.add_get("/health", health_handler)
+    internal_runner = web.AppRunner(app)
+    await internal_runner.setup()
+    
+    bridge_port = int(os.getenv('INTERNAL_BRIDGE_PORT', '8001'))
+    site = web.TCPSite(internal_runner, '127.0.0.1', bridge_port)
+    await site.start()
+    logger.info(f"内部解析与健康监控桥接服务已成功启动在 127.0.0.1:{bridge_port}")
 
 
 # 创建文件夹
@@ -107,6 +169,12 @@ async def start_clients():
         chat_updater = ChatUpdater(user_client)
         await chat_updater.start()
 
+        # 启动内部解析服务
+        try:
+            await start_internal_server(user_client, bot_client)
+        except Exception as e:
+            logger.error(f"启动内部解析服务失败: {str(e)}")
+
         # 如果启用了 RSS 服务
         if os.getenv('RSS_ENABLED', '').lower() == 'true':
             try:
@@ -136,6 +204,13 @@ async def start_clients():
             bot_client.run_until_disconnected()
         )
     finally:
+        # 停止内部解析服务
+        if internal_runner:
+            try:
+                await internal_runner.cleanup()
+                logger.info("内部解析服务已停止")
+            except Exception as e:
+                logger.error(f"停止内部解析服务时出错: {str(e)}")
         # 关闭 DBOperations
         if db_ops and hasattr(db_ops, 'close'):
             await db_ops.close()

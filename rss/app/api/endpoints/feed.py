@@ -608,7 +608,7 @@ async def delete_rule_data(rule_id: int):
                 if not dir_path.exists():
                     return True, "使用 shutil.rmtree 成功删除"
             except Exception as e:
-                pass
+                logger.warning(f"删除方法1(shutil.rmtree)异常: {str(e)}")
                 
             # 方法2: 使用系统命令
             try:
@@ -628,7 +628,7 @@ async def delete_rule_data(rule_id: int):
                 if not dir_path.exists():
                     return True, "使用系统命令成功删除"
             except Exception as e:
-                pass
+                logger.warning(f"删除方法2(系统命令)异常: {str(e)}")
                 
             # 方法3: 重命名后删除
             try:
@@ -638,7 +638,7 @@ async def delete_rule_data(rule_id: int):
                 if not dir_path.exists() and not temp_path.exists():
                     return True, "使用重命名后删除成功"
             except Exception as e:
-                pass
+                logger.warning(f"删除方法3(重命名)异常: {str(e)}")
             
             return False, "所有删除方法都失败"
         

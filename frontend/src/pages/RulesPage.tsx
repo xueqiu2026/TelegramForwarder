@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import useSWR, { mutate } from 'swr'
-import { Plus, X, ChevronRight } from 'lucide-react'
+import { Plus, X, ChevronRight, Trash2, AlertTriangle } from 'lucide-react'
 import * as Switch from '@radix-ui/react-switch'
+import * as Dialog from '@radix-ui/react-dialog'
 import { fetcher, rulesApi, keywordsApi, replaceApi, pushApi } from '../api'
-import type { RuleListItem, RuleDetail, Keyword, ReplaceRule as RRType, PushConfig } from '../types'
+import type { RuleListItem, RuleDetail, Keyword, ReplaceRule as RRType, PushConfig, ChatDetail } from '../types'
 
 // ── 枚举选项中文映射 ──────────────────────────────
 const ENUM_OPTIONS = {
@@ -120,6 +121,7 @@ const TABS = [
 
 export default function RulesPage() {
   const { data: rules } = useSWR<RuleListItem[]>('/rules', fetcher)
+  const { data: chats } = useSWR<ChatDetail[]>('/chats', fetcher)
   const { data: modelsDict } = useSWR<Record<string, string[]>>('/ai-models', fetcher)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const selectedRule = rules?.find(r => r.id === selectedId)
@@ -129,6 +131,59 @@ export default function RulesPage() {
   const [pushConfigs, setPushConfigs] = useState<PushConfig[]>([])
   const [saving, setSaving] = useState(false)
   const [activeTab, setActiveTab] = useState<'overview' | 'message' | 'ai' | 'filter' | 'push'>('overview')
+
+  // 新建规则状态
+  const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [sourceChatId, setSourceChatId] = useState<number | ''>('')
+  const [targetChatId, setTargetChatId] = useState<number | ''>('')
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+
+  // 打开创建规则弹窗
+  const openCreateDialog = () => {
+    setCreateError(null)
+    setSourceChatId('')
+    const defaultTarget = chats?.find(c => c.name === '2026')
+    setTargetChatId(defaultTarget ? defaultTarget.id : '')
+    setCreateDialogOpen(true)
+  }
+
+  // 创建规则
+  const handleCreateRule = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!sourceChatId || !targetChatId) return
+    setCreating(true)
+    setCreateError(null)
+    try {
+      const res = await rulesApi.create({
+        source_chat_id: Number(sourceChatId),
+        target_chat_id: Number(targetChatId)
+      })
+      mutate('/rules')
+      setCreateDialogOpen(false)
+      setSelectedId(res.id) // 自动高亮选中新规则
+      setSourceChatId('')
+      setTargetChatId('')
+    } catch (e: any) {
+      setCreateError(e?.response?.data?.detail || '创建规则失败，可能是该源频道到目标群组的规则已存在')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  // 删除规则
+  const handleDeleteRule = async (id: number) => {
+    try {
+      await rulesApi.delete(id)
+      mutate('/rules')
+      if (selectedId === id) {
+        setSelectedId(null)
+        setDetail(null)
+      }
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || '删除规则失败')
+    }
+  }
 
   // 时间徽标管理器变量与逻辑
   const [newTimeInput, setNewTimeInput] = useState('00:00')
@@ -203,15 +258,36 @@ export default function RulesPage() {
     finally { setSaving(false) }
   }
 
-  // ── 一键同步配置给所有其它频道规则 ──
-  const handleSyncToAll = async () => {
+  // ── 一键同步配置给所有其它频道规则（支持选择性字段同步） ──
+  const [showSyncModal, setShowSyncModal] = useState(false)
+  const [syncFields, setSyncFields] = useState<Record<string, boolean>>({
+    prompts: false,
+    ai_settings: false,
+    forward_settings: false,
+    push_settings: false,
+  })
+  const syncFieldGroups: Record<string, { label: string; fields: string[] }> = {
+    prompts: { label: '📡 所有总结 Prompt（简报 + 推文工厂 + 信息差快报）', fields: ['summary_prompt', 'summary_prompt_b', 'summary_prompt_d'] },
+    ai_settings: { label: '🤖 AI 设置（模型、提示词、开关）', fields: ['is_ai', 'ai_model', 'ai_prompt', 'enable_ai_upload_image', 'is_keyword_after_ai'] },
+    forward_settings: { label: '⚙️ 转发与总结设置（模式、时间、置顶等）', fields: ['forward_mode', 'handle_mode', 'message_mode', 'is_preview', 'is_replace', 'is_summary', 'summary_time', 'is_top_summary', 'use_bot', 'enable_forward', 'enable_comment_button'] },
+    push_settings: { label: '📢 推送设置', fields: ['enable_push', 'enable_only_push'] },
+  }
+  const handleSyncToAll = () => {
     if (!selectedId) return
-    if (!window.confirm('您确定要将当前频道规则的所有配置（AI开关、Prompt、推送设置等，Chat ID除外）一键同步给所有其他频道吗？这会覆盖它们原有的设置！')) return
+    setSyncFields({ prompts: false, ai_settings: false, forward_settings: false, push_settings: false })
+    setShowSyncModal(true)
+  }
+  const executeSyncToAll = async () => {
+    if (!selectedId) return
+    const selected = Object.entries(syncFields).filter(([, v]) => v).map(([k]) => k)
+    if (selected.length === 0) { alert('请至少选择一个同步项'); return }
+    const fields = selected.flatMap(k => syncFieldGroups[k].fields)
+    setShowSyncModal(false)
     setSaving(true)
     try {
-      const res = await rulesApi.syncToAll(selectedId)
+      const res = await rulesApi.syncToAll(selectedId, fields)
       setSaving(false)
-      alert(res.message || '配置已成功同步到所有频道规则')
+      alert(res.message || '配置已成功同步')
     } catch (e) {
       console.error(e)
       setSaving(false)
@@ -268,8 +344,18 @@ export default function RulesPage() {
     <div style={{ display: 'flex', gap: 20, height: '100%', minHeight: 0 }}>
       {/* ── 左侧: 规则列表 ─────────────────── */}
       <div className="card-glass" style={{ width: 300, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid var(--border-light)', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-          转发规则 <span className="badge badge-primary" style={{ marginLeft: 6 }}>{rules?.length ?? 0}</span>
+        <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid var(--border-light)', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>转发规则 <span className="badge badge-primary" style={{ marginLeft: 6 }}>{rules?.length ?? 0}</span></span>
+          <button 
+            onClick={openCreateDialog} 
+            style={{ 
+              background: 'none', border: 'none', color: 'var(--color-primary)', 
+              display: 'flex', alignItems: 'center', gap: 4, padding: 0, 
+              fontSize: 12, fontWeight: 600, cursor: 'pointer' 
+            }}
+          >
+            <Plus size={14} /> 新建
+          </button>
         </div>
         <div style={{ flex: 1, overflow: 'auto' }}>
           {!rules ? (
@@ -278,6 +364,7 @@ export default function RulesPage() {
             <div
               key={r.id}
               onClick={() => setSelectedId(r.id)}
+              className="rule-list-item-container"
               style={{
                 padding: '12px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
                 borderBottom: '1px solid var(--border-light)',
@@ -294,7 +381,25 @@ export default function RulesPage() {
                   → {r.target_chat_name}
                 </div>
               </div>
-              <ChevronRight size={14} color="var(--text-muted)" />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (window.confirm(`确定要删除规则 "${r.source_chat_name} → ${r.target_chat_name}" 吗？此操作将永久清空关联的过滤、替换、推送等配置！`)) {
+                      handleDeleteRule(r.id)
+                    }
+                  }}
+                  className="delete-rule-btn"
+                  style={{
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    padding: 2, display: 'flex', alignItems: 'center'
+                  }}
+                  title="删除规则"
+                >
+                  <Trash2 size={13} />
+                </button>
+                <ChevronRight size={14} color="var(--text-muted)" />
+              </div>
             </div>
           ))}
         </div>
@@ -789,16 +894,42 @@ export default function RulesPage() {
                         </div>
                       </div>
 
-                      <div>
-                        <label style={labelStyle}>定时总结 Prompt 提示词</label>
-                        <textarea
-                          value={detail.summary_prompt ?? ''}
-                          onBlur={e => saveField('summary_prompt', e.target.value)}
-                          onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt: e.target.value } : prev)}
-                          rows={8}
-                          style={{ ...inputStyle, resize: 'vertical' }}
-                          placeholder="配置每日总结的格式指南..."
-                        />
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                        <div>
+                          <label style={labelStyle}>📡 跨市场情报简报 Prompt</label>
+                          <textarea
+                            value={detail.summary_prompt ?? ''}
+                            onBlur={e => saveField('summary_prompt', e.target.value)}
+                            onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt: e.target.value } : prev)}
+                            rows={6}
+                            style={{ ...inputStyle, resize: 'vertical' }}
+                            placeholder="配置每日简报总结的格式指南..."
+                          />
+                        </div>
+                        <div>
+                          <label style={labelStyle}>☀️ 早安老铁 / 推文工厂 Prompt</label>
+                          <textarea
+                            value={detail.summary_prompt_b ?? ''}
+                            onBlur={e => saveField('summary_prompt_b', e.target.value)}
+                            onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt_b: e.target.value } : prev)}
+                            rows={6}
+                            style={{ ...inputStyle, resize: 'vertical' }}
+                            placeholder="留空则使用系统默认的推文工厂 Prompt..."
+                          />
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>留空时将自动使用 constants.py 中的默认 WRITING_PROMPT_B</span>
+                        </div>
+                        <div>
+                          <label style={labelStyle}>🏹 信息差快报 Prompt</label>
+                          <textarea
+                            value={detail.summary_prompt_d ?? ''}
+                            onBlur={e => saveField('summary_prompt_d', e.target.value)}
+                            onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt_d: e.target.value } : prev)}
+                            rows={6}
+                            style={{ ...inputStyle, resize: 'vertical' }}
+                            placeholder="留空则使用系统默认的信息差快报 Prompt..."
+                          />
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>留空时将自动使用 constants.py 中的默认 WRITING_PROMPT_D</span>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -870,6 +1001,145 @@ export default function RulesPage() {
           </div>
         )}
       </div>
+
+      {/* ── 新建转发规则 弹窗 ────────────────── */}
+      <Dialog.Root open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', zIndex: 1000 }} />
+          <Dialog.Content style={{
+            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+            width: '90%', maxWidth: 480,
+            background: 'var(--bg-surface)', borderRadius: 'var(--radius-lg)', padding: 24,
+            border: '1px solid var(--border-medium)', zIndex: 1001,
+            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3), 0 10px 10px -5px rgba(0,0,0,0.2)'
+          }}>
+            <Dialog.Title style={{ margin: '0 0 8px', fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>
+              新建转发规则
+            </Dialog.Title>
+            <Dialog.Description style={{ margin: '0 0 20px', fontSize: 13, color: 'var(--text-secondary)' }}>
+              创建一条从源频道自动转发/同步到目标群组的转发规则。
+            </Dialog.Description>
+
+            <form onSubmit={handleCreateRule} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div>
+                <label style={labelStyle}>源频道 (消息来源) *</label>
+                <select
+                  value={sourceChatId}
+                  onChange={e => setSourceChatId(e.target.value ? Number(e.target.value) : '')}
+                  required
+                  style={inputStyle}
+                >
+                  <option value="">(选择源频道/群组)</option>
+                  {chats?.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name || '未命名'} ({c.telegram_chat_id})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={labelStyle}>目标群组 (接收群组) *</label>
+                <select
+                  value={targetChatId}
+                  onChange={e => setTargetChatId(e.target.value ? Number(e.target.value) : '')}
+                  required
+                  style={inputStyle}
+                >
+                  <option value="">(选择目标频道/群组)</option>
+                  {chats?.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name || '未命名'} ({c.telegram_chat_id})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {createError && (
+                <div style={{
+                  display: 'flex', gap: 8, padding: 12, borderRadius: 'var(--radius-sm)',
+                  background: 'rgba(239,68,68,0.1)', color: 'var(--color-danger)', border: '1px solid rgba(239,68,68,0.3)',
+                  fontSize: 13
+                }}>
+                  <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <strong>创建失败</strong>
+                    <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>{createError}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* 弹窗底部操作 */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 8, paddingTop: 16, borderTop: '1px solid var(--border-light)' }}>
+                <Dialog.Close asChild>
+                  <button type="button" disabled={creating} style={{ ...btnStyle, background: 'var(--bg-surface-hover)', border: '1px solid var(--border-light)', color: 'var(--text-primary)' }}>取消</button>
+                </Dialog.Close>
+                <button type="submit" disabled={creating || !sourceChatId || !targetChatId} style={btnStyle}>
+                  {creating ? '创建中...' : '确认创建'}
+                </button>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+        {/* 同步选择弹窗 */}
+        {showSyncModal && (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)'
+          }}>
+            <div className="card-glass" style={{
+              padding: 24, minWidth: 420, maxWidth: 500,
+              display: 'flex', flexDirection: 'column', gap: 16
+            }}>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>
+                🚀 选择要同步的配置项
+              </h3>
+              <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>
+                仅勾选的配置将被同步到所有其他频道规则，未勾选的项不会被覆盖。
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {Object.entries(syncFieldGroups).map(([key, { label }]) => (
+                  <label key={key} style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+                    background: syncFields[key] ? 'var(--bg-surface-hover)' : 'transparent',
+                    borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-light)',
+                    cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)',
+                    transition: 'background 0.15s'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={syncFields[key]}
+                      onChange={e => setSyncFields(prev => ({ ...prev, [key]: e.target.checked }))}
+                      style={{ accentColor: 'var(--color-primary)' }}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+                <button
+                  onClick={() => setShowSyncModal(false)}
+                  style={{
+                    padding: '6px 16px', borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border-light)', background: 'var(--bg-surface)',
+                    color: 'var(--text-primary)', cursor: 'pointer', fontSize: 13
+                  }}
+                >取消</button>
+                <button
+                  onClick={executeSyncToAll}
+                  style={{
+                    padding: '6px 16px', borderRadius: 'var(--radius-sm)',
+                    border: 'none', background: 'var(--color-primary)',
+                    color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600
+                  }}
+                >确认同步</button>
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   )
 }

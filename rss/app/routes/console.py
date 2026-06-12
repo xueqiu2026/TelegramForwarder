@@ -76,7 +76,7 @@ async def json_login(data: Dict):
 
 
 @router.post("/auth/logout")
-async def json_logout():
+def json_logout():
     """清除 JWT Cookie"""
     response = JSONResponse({"status": "success"})
     response.delete_cookie("access_token")
@@ -84,7 +84,7 @@ async def json_logout():
 
 
 @router.get("/auth/me")
-async def get_me(user=Depends(get_current_user)):
+def get_me(user=Depends(get_current_user)):
     """检查当前会话状态"""
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
@@ -173,24 +173,196 @@ async def log_generator():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 1. Chat 列表
+# 1. Chat 列表与管理
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/chats")
-async def get_chats(user=Depends(get_current_user)):
+def get_chats(user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
         chats = db.query(Chat).all()
-        return [{"id": c.id, "telegram_chat_id": c.telegram_chat_id, "name": c.name} for c in chats]
+        result = []
+        for c in chats:
+            source_rule_count = db.query(ForwardRule).filter(ForwardRule.source_chat_id == c.id).count()
+            target_rule_count = db.query(ForwardRule).filter(ForwardRule.target_chat_id == c.id).count()
+            result.append({
+                "id": c.id,
+                "telegram_chat_id": c.telegram_chat_id,
+                "name": c.name,
+                "source_rule_count": source_rule_count,
+                "target_rule_count": target_rule_count
+            })
+        return result
     finally:
         db.close()
+
+
+@router.put("/chats/{id}")
+def update_chat(id: int, data: Dict, user=Depends(get_current_user)):
+    require_auth(user)
+    name = data.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="名称不能为空")
+    db = get_session()
+    try:
+        chat = db.query(Chat).filter(Chat.id == id).first()
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat 记录不存在")
+        chat.name = name
+        db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.delete("/chats/{id}")
+def delete_chat(id: int, user=Depends(get_current_user)):
+    require_auth(user)
+    db = get_session()
+    try:
+        # 检查是否被规则引用
+        has_ref = db.query(ForwardRule).filter(
+            (ForwardRule.source_chat_id == id) | (ForwardRule.target_chat_id == id)
+        ).first()
+        if has_ref:
+            raise HTTPException(status_code=400, detail="该频道已被转发规则引用，无法删除")
+            
+        chat = db.query(Chat).filter(Chat.id == id).first()
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat 记录不存在")
+        db.delete(chat)
+        db.commit()
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.post("/chats/resolve")
+async def resolve_chat(data: Dict, user=Depends(get_current_user)):
+    require_auth(user)
+    link = data.get("link")
+    if not link:
+        raise HTTPException(status_code=400, detail="解析链接或用户名不能为空")
+    
+    import httpx
+    # 转发请求到主进程内部服务
+    try:
+        bridge_port = os.getenv('INTERNAL_BRIDGE_PORT', '8001')
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.post(f"http://127.0.0.1:{bridge_port}/resolve", json={"link": link}, timeout=10.0)
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code, 
+                    detail=response.json().get("message", "解析失败")
+                )
+            res_data = response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"解析失败: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"内部解析服务通信失败: {str(e)}")
+        
+    # 保存或更新到数据库
+    db = get_session()
+    try:
+        telegram_chat_id = res_data.get("telegram_chat_id")
+        name = res_data.get("name")
+        
+        chat = db.query(Chat).filter(Chat.telegram_chat_id == telegram_chat_id).first()
+        if not chat:
+            chat = Chat(telegram_chat_id=telegram_chat_id, name=name)
+            db.add(chat)
+            db.commit()
+            db.refresh(chat)
+        else:
+            # 如果名称有变化，进行同步更新
+            if chat.name != name:
+                chat.name = name
+                db.commit()
+                db.refresh(chat)
+                
+        return {
+            "status": "success",
+            "chat": {
+                "id": chat.id,
+                "telegram_chat_id": chat.telegram_chat_id,
+                "name": chat.name
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"数据库更新失败: {str(e)}")
+    finally:
+        db.close()
+
+
+@router.get("/health")
+def health_check():
+    db_status = "unhealthy"
+    db_error = None
+    
+    # 1. 检查数据库连通性
+    from sqlalchemy import text
+    db = get_session()
+    try:
+        db.execute(text("SELECT 1"))
+        db_status = "healthy"
+    except Exception as e:
+        db_error = str(e)
+    finally:
+        db.close()
+        
+    # 2. 检查 Telegram 客户端状态 (向主进程发送 HTTP 请求)
+    bridge_status = "disconnected"
+    user_client_connected = False
+    bot_client_connected = False
+    bridge_error = None
+    
+    import httpx
+    bridge_port = os.getenv('INTERNAL_BRIDGE_PORT', '8001')
+    try:
+        with httpx.Client(trust_env=False) as client:
+            resp = client.get(f"http://127.0.0.1:{bridge_port}/health", timeout=2.0)
+            if resp.status_code == 200:
+                bridge_status = "healthy"
+                res_data = resp.json()
+                user_client_connected = res_data.get("user_client_connected", False)
+                bot_client_connected = res_data.get("bot_client_connected", False)
+            else:
+                bridge_status = f"error_code_{resp.status_code}"
+    except Exception as e:
+        bridge_error = str(e)
+        
+    overall_status = "healthy" if db_status == "healthy" and bridge_status == "healthy" and user_client_connected and bot_client_connected else "degraded"
+    
+    return {
+        "status": overall_status,
+        "database": {
+            "status": db_status,
+            "error": db_error
+        },
+        "bridge": {
+            "status": bridge_status,
+            "port": bridge_port,
+            "user_client_connected": user_client_connected,
+            "bot_client_connected": bot_client_connected,
+            "error": bridge_error
+        }
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════
 # 2. 规则管理 (CRUD)
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rules")
-async def get_rules(user=Depends(get_current_user)):
+def get_rules(user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -215,7 +387,7 @@ async def get_rules(user=Depends(get_current_user)):
 
 
 @router.post("/rules")
-async def create_rule(data: Dict, user=Depends(get_current_user)):
+def create_rule(data: Dict, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -238,7 +410,7 @@ async def create_rule(data: Dict, user=Depends(get_current_user)):
 
 
 @router.get("/rules/{id}")
-async def get_rule_detail(id: int, user=Depends(get_current_user)):
+def get_rule_detail(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -275,6 +447,8 @@ async def get_rule_detail(id: int, user=Depends(get_current_user)):
             "is_summary": r.is_summary,
             "summary_time": r.summary_time,
             "summary_prompt": r.summary_prompt,
+            "summary_prompt_b": r.summary_prompt_b,
+            "summary_prompt_d": r.summary_prompt_d,
             "is_keyword_after_ai": r.is_keyword_after_ai,
             "is_top_summary": r.is_top_summary,
             # 其他
@@ -288,7 +462,7 @@ async def get_rule_detail(id: int, user=Depends(get_current_user)):
 
 
 @router.put("/rules/{id}")
-async def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
+def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -304,6 +478,7 @@ async def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
             "is_original_time", "add_mode", "enable_rule", "handle_mode",
             "enable_comment_button", "is_ai", "ai_model", "ai_prompt",
             "enable_ai_upload_image", "is_summary", "summary_time", "summary_prompt",
+            "summary_prompt_b", "summary_prompt_d",
             "is_keyword_after_ai", "is_top_summary", "enable_push", "enable_only_push",
             "only_rss", "enable_sync", "enable_forward"
         ]:
@@ -336,7 +511,7 @@ async def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
 
 
 @router.delete("/rules/{id}")
-async def delete_rule(id: int, user=Depends(get_current_user)):
+def delete_rule(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -357,7 +532,7 @@ async def delete_rule(id: int, user=Depends(get_current_user)):
 # 3. 关键字管理 (含 DELETE)
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rules/{id}/keywords")
-async def get_keywords(id: int, user=Depends(get_current_user)):
+def get_keywords(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -368,7 +543,7 @@ async def get_keywords(id: int, user=Depends(get_current_user)):
 
 
 @router.post("/rules/{id}/keywords")
-async def add_keyword(id: int, data: Dict, user=Depends(get_current_user)):
+def add_keyword(id: int, data: Dict, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -389,7 +564,7 @@ async def add_keyword(id: int, data: Dict, user=Depends(get_current_user)):
 
 
 @router.delete("/rules/{rule_id}/keywords/{kw_id}")
-async def delete_keyword(rule_id: int, kw_id: int, user=Depends(get_current_user)):
+def delete_keyword(rule_id: int, kw_id: int, user=Depends(get_current_user)):
     """删除单个关键字"""
     require_auth(user)
     db = get_session()
@@ -413,7 +588,7 @@ async def delete_keyword(rule_id: int, kw_id: int, user=Depends(get_current_user
 # 4. 替换规则管理 (含 DELETE)
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rules/{id}/replace")
-async def get_replace_rules(id: int, user=Depends(get_current_user)):
+def get_replace_rules(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -424,7 +599,7 @@ async def get_replace_rules(id: int, user=Depends(get_current_user)):
 
 
 @router.post("/rules/{id}/replace")
-async def add_replace_rule(id: int, data: Dict, user=Depends(get_current_user)):
+def add_replace_rule(id: int, data: Dict, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -444,7 +619,7 @@ async def add_replace_rule(id: int, data: Dict, user=Depends(get_current_user)):
 
 
 @router.delete("/rules/{rule_id}/replace/{rr_id}")
-async def delete_replace_rule(rule_id: int, rr_id: int, user=Depends(get_current_user)):
+def delete_replace_rule(rule_id: int, rr_id: int, user=Depends(get_current_user)):
     """删除单个替换规则"""
     require_auth(user)
     db = get_session()
@@ -468,7 +643,7 @@ async def delete_replace_rule(rule_id: int, rr_id: int, user=Depends(get_current
 # 5. 媒体类型过滤 (BUG-12: 补 rollback)
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rules/{id}/media-types")
-async def get_media_types(id: int, user=Depends(get_current_user)):
+def get_media_types(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -484,7 +659,7 @@ async def get_media_types(id: int, user=Depends(get_current_user)):
 
 
 @router.put("/rules/{id}/media-types")
-async def update_media_types(id: int, data: Dict, user=Depends(get_current_user)):
+def update_media_types(id: int, data: Dict, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -510,7 +685,7 @@ async def update_media_types(id: int, data: Dict, user=Depends(get_current_user)
 # 6. 推送通道管理 (含 DELETE)
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rules/{id}/push-config")
-async def get_push_config(id: int, user=Depends(get_current_user)):
+def get_push_config(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -526,7 +701,7 @@ async def get_push_config(id: int, user=Depends(get_current_user)):
 
 
 @router.post("/rules/{id}/push-config")
-async def create_push_config(id: int, data: Dict, user=Depends(get_current_user)):
+def create_push_config(id: int, data: Dict, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -547,7 +722,7 @@ async def create_push_config(id: int, data: Dict, user=Depends(get_current_user)
 
 
 @router.delete("/rules/{rule_id}/push-config/{pc_id}")
-async def delete_push_config(rule_id: int, pc_id: int, user=Depends(get_current_user)):
+def delete_push_config(rule_id: int, pc_id: int, user=Depends(get_current_user)):
     """删除推送通道"""
     require_auth(user)
     db = get_session()
@@ -631,7 +806,7 @@ async def get_summaries(page: int = 1, limit: int = 10, search: Optional[str] = 
 # 9. RSS 配置 CRUD (从 rss.py 迁移为 JSON API)
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rss-configs")
-async def get_rss_configs(user=Depends(get_current_user)):
+def get_rss_configs(user=Depends(get_current_user)):
     """获取所有 RSS 配置"""
     require_auth(user)
     db = get_session()
@@ -663,7 +838,7 @@ async def get_rss_configs(user=Depends(get_current_user)):
 
 
 @router.post("/rss-configs")
-async def create_rss_config(data: Dict, user=Depends(get_current_user)):
+def create_rss_config(data: Dict, user=Depends(get_current_user)):
     """创建 RSS 配置"""
     require_auth(user)
     db = get_session()
@@ -706,7 +881,7 @@ async def create_rss_config(data: Dict, user=Depends(get_current_user)):
 
 
 @router.put("/rss-configs/{config_id}")
-async def update_rss_config(config_id: int, data: Dict, user=Depends(get_current_user)):
+def update_rss_config(config_id: int, data: Dict, user=Depends(get_current_user)):
     """更新 RSS 配置"""
     require_auth(user)
     db = get_session()
@@ -735,7 +910,7 @@ async def update_rss_config(config_id: int, data: Dict, user=Depends(get_current
 
 
 @router.delete("/rss-configs/{config_id}")
-async def delete_rss_config(config_id: int, user=Depends(get_current_user)):
+def delete_rss_config(config_id: int, user=Depends(get_current_user)):
     """删除 RSS 配置（级联删除 patterns）"""
     require_auth(user)
     db = get_session()
@@ -756,7 +931,7 @@ async def delete_rss_config(config_id: int, user=Depends(get_current_user)):
 
 
 @router.post("/rss-configs/{config_id}/toggle")
-async def toggle_rss_config(config_id: int, user=Depends(get_current_user)):
+def toggle_rss_config(config_id: int, user=Depends(get_current_user)):
     """切换 RSS 启用/禁用"""
     require_auth(user)
     db = get_session()
@@ -778,7 +953,7 @@ async def toggle_rss_config(config_id: int, user=Depends(get_current_user)):
 # 10. 正则模式 CRUD
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/rss-configs/{config_id}/patterns")
-async def get_patterns(config_id: int, user=Depends(get_current_user)):
+def get_patterns(config_id: int, user=Depends(get_current_user)):
     """获取指定 RSS 配置的所有正则模式"""
     require_auth(user)
     db = get_session()
@@ -795,7 +970,7 @@ async def get_patterns(config_id: int, user=Depends(get_current_user)):
 
 
 @router.post("/rss-configs/{config_id}/patterns")
-async def create_pattern(config_id: int, data: Dict, user=Depends(get_current_user)):
+def create_pattern(config_id: int, data: Dict, user=Depends(get_current_user)):
     """创建正则模式"""
     require_auth(user)
     db = get_session()
@@ -822,7 +997,7 @@ async def create_pattern(config_id: int, data: Dict, user=Depends(get_current_us
 
 
 @router.delete("/rss-configs/{config_id}/patterns")
-async def delete_all_patterns(config_id: int, user=Depends(get_current_user)):
+def delete_all_patterns(config_id: int, user=Depends(get_current_user)):
     """删除配置的所有正则模式"""
     require_auth(user)
     db = get_session()
@@ -838,7 +1013,7 @@ async def delete_all_patterns(config_id: int, user=Depends(get_current_user)):
 
 
 @router.delete("/rss-configs/patterns/{pattern_id}")
-async def delete_pattern(pattern_id: int, user=Depends(get_current_user)):
+def delete_pattern(pattern_id: int, user=Depends(get_current_user)):
     """删除单个正则模式"""
     require_auth(user)
     db = get_session()
@@ -862,7 +1037,7 @@ async def delete_pattern(pattern_id: int, user=Depends(get_current_user)):
 # 11. 正则表达式在线测试
 # ══════════════════════════════════════════════════════════════════════
 @router.post("/test-regex")
-async def test_regex(data: Dict, user=Depends(get_current_user)):
+def test_regex(data: Dict, user=Depends(get_current_user)):
     """测试正则表达式匹配"""
     require_auth(user)
     pattern_str = data.get("pattern", "")
@@ -897,14 +1072,14 @@ async def test_regex(data: Dict, user=Depends(get_current_user)):
 # 11.5 AI 模型获取端点
 # ══════════════════════════════════════════════════════════════════════
 @router.get("/ai-models")
-async def get_ai_models(user=Depends(get_current_user)):
+def get_ai_models(user=Depends(get_current_user)):
     require_auth(user)
     from utils.settings import load_ai_models
     return load_ai_models(type="dict")
 
 
 @router.get("/ai-default-model")
-async def get_ai_default_model(user=Depends(get_current_user)):
+def get_ai_default_model(user=Depends(get_current_user)):
     require_auth(user)
     from utils.constants import DEFAULT_AI_MODEL
     return {"default_model": DEFAULT_AI_MODEL}
@@ -914,7 +1089,7 @@ async def get_ai_default_model(user=Depends(get_current_user)):
 # 11.6 P3 规则同步与 AI 沙盒训练辅助端点
 # ══════════════════════════════════════════════════════════════════════
 @router.post("/rules/{id}/sync-to-all")
-async def sync_rule_to_all(id: int, user=Depends(get_current_user)):
+def sync_rule_to_all(id: int, data: Dict = None, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
@@ -922,18 +1097,55 @@ async def sync_rule_to_all(id: int, user=Depends(get_current_user)):
         if not source_rule:
             raise HTTPException(status_code=404, detail="Source rule not found")
         
+        # 始终排除的字段
         exclude_fields = {"id", "source_chat_id", "target_chat_id", "created_at"}
+        
+        # 如果前端传了 fields 列表，则只同步指定字段；否则全量同步
+        requested_fields = (data or {}).get("fields", None) if data else None
+        
         update_data = {}
         for column in ForwardRule.__table__.columns:
-            if column.name not in exclude_fields:
-                update_data[column.name] = getattr(source_rule, column.name)
+            if column.name in exclude_fields:
+                continue
+            if requested_fields and column.name not in requested_fields:
+                continue
+            update_data[column.name] = getattr(source_rule, column.name)
                 
         db.query(ForwardRule).filter(ForwardRule.id != id).update(update_data)
         db.commit()
-        return {"status": "success", "message": "已成功将此规则的配置复制到所有其他频道规则"}
+        
+        synced = list(update_data.keys())
+        return {"status": "success", "message": f"已成功同步 {len(synced)} 个字段到所有其他频道规则", "synced_fields": synced}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@router.post("/sandbox/apply-prompt")
+def apply_sandbox_prompt(data: Dict, user=Depends(get_current_user)):
+    """沙盒中一键将优化后的 Prompt 应用到所有规则"""
+    require_auth(user)
+    prompt = data.get("prompt")
+    prompt_type = data.get("type", "summary_prompt")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt 不能为空")
+    valid_types = ("summary_prompt", "summary_prompt_b", "summary_prompt_d")
+    if prompt_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"非法的 Prompt 类型，允许值: {valid_types}")
+
+    db = get_session()
+    try:
+        count = db.query(ForwardRule).update({getattr(ForwardRule, prompt_type): prompt})
+        db.commit()
+        return {"status": "success", "message": f"已将 Prompt 应用到 {count} 条规则的 {prompt_type} 字段"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"应用沙盒 Prompt 失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
@@ -967,7 +1179,7 @@ async def upload_sandbox_json(file: UploadFile = File(...), user=Depends(get_cur
 
 
 @router.get("/sandbox/history-samples")
-async def get_history_samples(user=Depends(get_current_user)):
+def get_history_samples(user=Depends(get_current_user)):
     """从数据库获取频道消息统计，替代旧版 JSON 文件读取"""
     require_auth(user)
     from sqlalchemy import func
@@ -1019,7 +1231,7 @@ async def get_history_samples(user=Depends(get_current_user)):
 
 
 @router.post("/sandbox/aggregate-messages")
-async def aggregate_messages(data: Dict, user=Depends(get_current_user)):
+def aggregate_messages(data: Dict, user=Depends(get_current_user)):
     """从数据库聚合消息，替代旧版 JSON 文件读取"""
     require_auth(user)
     from datetime import datetime, timezone, timedelta
@@ -1053,12 +1265,10 @@ async def aggregate_messages(data: Dict, user=Depends(get_current_user)):
 
         aggregated_texts = []
         for ch_id, msgs in grouped.items():
-            ch_name = msgs[0].source_chat_name or ch_id
-            aggregated_texts.append(f"=== 频道: {ch_name} (共 {len(msgs)} 条消息) ===")
             for m in msgs:
-                date_str = m.message_date.isoformat() if m.message_date else ""
-                aggregated_texts.append(f"[{date_str}] ID {m.telegram_message_id}: {m.message_text}")
-            aggregated_texts.append("\n")
+                msg_time = m.message_date.strftime('%H:%M') if m.message_date else ''
+                source_name = m.source_chat_name or '未知频道'
+                aggregated_texts.append(f"【{source_name}】 {msg_time} - {m.message_text}")
 
         combined_text = "\n".join(aggregated_texts)
         return {"status": "success", "text": combined_text}

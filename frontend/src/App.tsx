@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Rss, Settings, Cpu, Activity, LogOut, Key, X } from 'lucide-react'
+import { Rss, Settings, Cpu, Activity, LogOut, Key, X, Send } from 'lucide-react'
 import './App.css'
 
 import { authApi } from './api'
@@ -8,8 +8,9 @@ import RulesPage from './pages/RulesPage'
 import RssPage from './pages/RssPage'
 import AiSandboxPage from './pages/AiSandboxPage'
 import MonitorPage from './pages/MonitorPage'
+import TgPage from './pages/TgPage'
 
-type TabId = 'rss' | 'rules' | 'ai' | 'monitor'
+type TabId = 'rss' | 'rules' | 'ai' | 'monitor' | 'tg'
 
 interface TabDef {
   id: TabId
@@ -19,6 +20,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { id: 'rules', label: '规则设置', icon: <Settings size={16} /> },
+  { id: 'tg', label: 'TG 管理', icon: <Send size={16} /> },
   { id: 'rss', label: 'RSS 管理', icon: <Rss size={16} /> },
   { id: 'ai', label: 'AI 沙盒', icon: <Cpu size={16} /> },
   { id: 'monitor', label: '运维监控', icon: <Activity size={16} /> },
@@ -162,6 +164,7 @@ export default function App() {
       {/* ── 主内容区 ───────────────────────────────── */}
       <main className="main-content">
         {activeTab === 'rules' && <RulesPage />}
+        {activeTab === 'tg' && <TgPage />}
         {activeTab === 'rss' && <RssPage />}
         {activeTab === 'ai' && <AiSandboxPage />}
         {activeTab === 'monitor' && <MonitorPage />}

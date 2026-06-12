@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type {
   RuleListItem, RuleDetail, Keyword, ReplaceRule as ReplaceRuleType,
-  PushConfig, MediaTypes, RssConfig, RssPattern, SummaryResponse, Chat
+  PushConfig, MediaTypes, RssConfig, RssPattern, SummaryResponse, Chat, ChatDetail
 } from './types'
 
 // ── Axios 实例 (BUG-03 修复: withCredentials) ─────────────
@@ -28,16 +28,20 @@ export const authApi = {
 
 // ── Chat ──────────────────────────────────────────────────
 export const chatsApi = {
-  getAll: () => api.get<Chat[]>('/chats').then(r => r.data),
+  getAll: () => api.get<ChatDetail[]>('/chats').then(r => r.data),
+  update: (id: number, name: string) => api.put(`/chats/${id}`, { name }).then(r => r.data),
+  delete: (id: number) => api.delete(`/chats/${id}`).then(r => r.data),
+  resolve: (link: string) => api.post<{ status: string; chat: Chat }>('/chats/resolve', { link }).then(r => r.data),
 }
 
 // ── Rules ─────────────────────────────────────────────────
 export const rulesApi = {
   getAll: () => api.get<RuleListItem[]>('/rules').then(r => r.data),
   getById: (id: number) => api.get<RuleDetail>(`/rules/${id}`).then(r => r.data),
+  create: (data: { source_chat_id: number; target_chat_id: number }) => api.post<{ id: number }>('/rules', data).then(r => r.data),
   update: (id: number, data: Partial<RuleDetail>) => api.put(`/rules/${id}`, data),
   delete: (id: number) => api.delete(`/rules/${id}`),
-  syncToAll: (id: number) => api.post(`/rules/${id}/sync-to-all`).then(r => r.data),
+  syncToAll: (id: number, fields?: string[]) => api.post(`/rules/${id}/sync-to-all`, fields ? { fields } : undefined).then(r => r.data),
 }
 
 // ── Keywords ──────────────────────────────────────────────

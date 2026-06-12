@@ -64,6 +64,8 @@ class SummaryScheduler:
                     'target_chat_name': ref_rule.target_chat.name,
                     'summary_time': merged_summary_time,
                     'summary_prompt': ref_rule.summary_prompt,
+                    'summary_prompt_b': ref_rule.summary_prompt_b,
+                    'summary_prompt_d': ref_rule.summary_prompt_d,
                     'ai_model': ref_rule.ai_model,
                 }
                 logger.info(f"为目标群组 {config['target_chat_name']} ({target_id}) 创建/更新定时总结任务，合并时刻: {config['summary_time']}")
@@ -109,6 +111,8 @@ class SummaryScheduler:
                 'target_chat_name': rule.target_chat.name,
                 'summary_time': rule.summary_time,
                 'summary_prompt': rule.summary_prompt,
+                'summary_prompt_b': rule.summary_prompt_b,
+                'summary_prompt_d': rule.summary_prompt_d,
                 'ai_model': rule.ai_model,
             }
             await self._execute_aggregated_summary(target_id, config, is_now=is_now)
@@ -274,8 +278,8 @@ class SummaryScheduler:
 
             # 8.5 [P8] 写作 Prompt 自动推送（推文工厂 + 信息差猎手）
             writing_prompts = [
-                ("🐦 推文工厂", WRITING_PROMPT_B),
-                ("🏹 信息差快报", WRITING_PROMPT_D),
+                ("🐦 推文工厂", config.get('summary_prompt_b') or WRITING_PROMPT_B),
+                ("🏹 信息差快报", config.get('summary_prompt_d') or WRITING_PROMPT_D),
             ]
             for wp_name, wp_prompt in writing_prompts:
                 try:
@@ -364,6 +368,8 @@ class SummaryScheduler:
                         'target_chat_name': rule.target_chat.name,
                         'summary_time_set': set(),
                         'summary_prompt': rule.summary_prompt,
+                        'summary_prompt_b': rule.summary_prompt_b,
+                        'summary_prompt_d': rule.summary_prompt_d,
                         'ai_model': rule.ai_model,
                     }
                 if rule.summary_time:
@@ -412,6 +418,8 @@ class SummaryScheduler:
                         'target_chat_name': rule.target_chat.name,
                         'summary_time_set': set(),
                         'summary_prompt': rule.summary_prompt,
+                        'summary_prompt_b': rule.summary_prompt_b,
+                        'summary_prompt_d': rule.summary_prompt_d,
                         'ai_model': rule.ai_model,
                     }
                 if rule.summary_time:
