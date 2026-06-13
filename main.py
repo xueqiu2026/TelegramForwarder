@@ -13,7 +13,7 @@ from models.db_operations import DBOperations
 from scheduler.summary_scheduler import SummaryScheduler
 from scheduler.chat_updater import ChatUpdater
 from handlers.bot_handler import send_welcome_message
-from rss.main import app as rss_app
+from rss.main import app as rss_app  # noqa: used by health check route
 from utils.log_config import setup_logging
 
 # 设置Docker日志的默认配置，如果docker-compose.yml中没有配置日志选项将使用这些值
@@ -142,13 +142,6 @@ bot_client = TelegramClient('./sessions/bot', api_id, api_hash)
 engine = init_db()
 
 
-def run_rss_server(host: str, port: int):
-    """在新进程中运行 RSS 服务器"""
-    uvicorn.run(
-        rss_app,
-        host=host,
-        port=port
-    )
 
 
 async def start_clients():
@@ -194,7 +187,8 @@ async def start_clients():
                 rss_port = int(os.getenv('RSS_PORT', '8000'))
                 logger.info(f"正在启动 RSS 服务 (host={rss_host}, port={rss_port})")
                 
-                # 使用 spawn 而非 fork，避免子进程继承 Telethon 的连接/auth_key
+                # 使用 spawn + 独立模块，避免子进程 import main.py 创建 TelegramClient
+                from rss_runner import run_rss_server
                 ctx = multiprocessing.get_context('spawn')
                 rss_process = ctx.Process(
                     target=run_rss_server,
