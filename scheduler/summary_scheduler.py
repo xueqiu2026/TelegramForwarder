@@ -231,18 +231,17 @@ class SummaryScheduler:
                                 target_chat_id_int, message_to_send
                             )
                         break
-                    except errors.MarkupInvalidError:
-                        if use_markdown:
-                            use_markdown = False
-                            continue
-                        raise
                     except errors.FloodWaitError as fwe:
                         if attempt < MAX_SEND_ATTEMPTS - 1:
                             await asyncio.sleep(fwe.seconds)
                             attempt += 1
                         else:
                             raise
-                    except Exception:
+                    except Exception as send_err:
+                        if use_markdown:
+                            logger.warning(f"Markdown 发送失败，降级为纯文本: {send_err}")
+                            use_markdown = False
+                            continue
                         if attempt >= MAX_SEND_ATTEMPTS - 1:
                             raise
                         await asyncio.sleep(1)
@@ -311,15 +310,14 @@ class SummaryScheduler:
                                             target_chat_id_int, wp_msg
                                         )
                                     break
-                                except errors.MarkupInvalidError:
-                                    if wp_use_md:
-                                        wp_use_md = False
-                                        continue
-                                    raise
                                 except errors.FloodWaitError as fwe:
                                     await asyncio.sleep(fwe.seconds)
                                     wp_attempt += 1
-                                except Exception:
+                                except Exception as wp_send_err:
+                                    if wp_use_md:
+                                        logger.warning(f"写作推送 Markdown 发送失败，降级为纯文本: {wp_send_err}")
+                                        wp_use_md = False
+                                        continue
                                     wp_attempt += 1
                                     await asyncio.sleep(1)
 

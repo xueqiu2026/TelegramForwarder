@@ -100,8 +100,20 @@ async def start_internal_server(user_client, bot_client):
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
 
+    async def trigger_summary_handler(request):
+        """通过 bridge 在 main 进程 event loop 中触发总结"""
+        try:
+            global scheduler
+            if not scheduler:
+                return web.json_response({"status": "error", "message": "调度器未初始化"}, status=500)
+            asyncio.create_task(scheduler.execute_all_summaries())
+            return web.json_response({"status": "success", "message": "已在主进程触发聚合总结"})
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+
     app.router.add_post("/resolve", resolve_handler)
     app.router.add_get("/health", health_handler)
+    app.router.add_post("/trigger-summary", trigger_summary_handler)
     internal_runner = web.AppRunner(app)
     await internal_runner.setup()
     
