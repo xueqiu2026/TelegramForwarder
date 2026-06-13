@@ -194,8 +194,9 @@ async def start_clients():
                 rss_port = int(os.getenv('RSS_PORT', '8000'))
                 logger.info(f"正在启动 RSS 服务 (host={rss_host}, port={rss_port})")
                 
-                # 在新进程中启动 RSS 服务
-                rss_process = multiprocessing.Process(
+                # 使用 spawn 而非 fork，避免子进程继承 Telethon 的连接/auth_key
+                ctx = multiprocessing.get_context('spawn')
+                rss_process = ctx.Process(
                     target=run_rss_server,
                     args=(rss_host, rss_port)
                 )
