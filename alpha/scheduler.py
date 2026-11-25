@@ -13,8 +13,8 @@ TZ = pytz.timezone('Asia/Shanghai')
 
 def latest_slot(now):
     now = now.astimezone(TZ)
-    slots = [now.replace(hour=h, minute=0, second=0, microsecond=0) for h in (7, 13, 19)]
-    slots += [(now - timedelta(days=1)).replace(hour=19, minute=0, second=0, microsecond=0)]
+    slots = [now.replace(hour=h, minute=0, second=0, microsecond=0) for h in (7, 13, 19, 22)]
+    slots += [(now - timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0)]
     return max(s for s in slots if s <= now).isoformat()
 
 

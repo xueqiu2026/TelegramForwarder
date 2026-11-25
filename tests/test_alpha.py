@@ -740,9 +740,10 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(AlreadyRunning):
                 with RunLock(): pass
         self.assertFalse(job(self.db).enabled)
-        for hour, expected in [(6, 19), (7, 7), (12, 7), (13, 13), (18, 13), (19, 19)]:
+        for hour, expected in [(0, 22), (6, 22), (7, 7), (12, 7), (13, 13), (18, 13), (19, 19), (21, 19), (22, 22), (23, 22)]:
             slot = datetime.fromisoformat(latest_slot(TZ.localize(NOW.replace(hour=hour))))
             self.assertEqual(slot.hour, expected)
+            self.assertEqual(slot.date(), (NOW - timedelta(days=1)).date() if hour < 7 else NOW.date())
 
     async def test_edit_during_analysis_never_marks_old_result_done(self):
         row = self.store()
