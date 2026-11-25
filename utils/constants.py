@@ -41,7 +41,8 @@ RSS_DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, RSS_DATA_PATH)
                             else RSS_DATA_PATH)
 
 # 默认AI模型
-DEFAULT_AI_MODEL = os.getenv('DEFAULT_AI_MODEL', 'gpt-5.5')
+from utils.settings import get_default_ai_model
+DEFAULT_AI_MODEL = get_default_ai_model()
 
 # ══════════════════════════════════════════════════════════════════
 # 生产 Prompt 配置（P8 确定版）

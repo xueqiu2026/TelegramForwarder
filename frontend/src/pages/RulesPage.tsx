@@ -122,6 +122,7 @@ const TABS = [
 export default function RulesPage() {
   const { data: rules } = useSWR<RuleListItem[]>('/rules', fetcher)
   const { data: chats } = useSWR<ChatDetail[]>('/chats', fetcher)
+  const { data: defaultModelData } = useSWR<{ default_model: string }>('/ai-default-model', fetcher)
   const { data: modelsDict } = useSWR<Record<string, string[]>>('/ai-models', fetcher)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const selectedRule = rules?.find(r => r.id === selectedId)
@@ -239,7 +240,7 @@ export default function RulesPage() {
       } else if (presetType === 'ai') {
         preset = {
           is_ai: true,
-          ai_model: 'gpt-5.5',
+          ai_model: defaultModelData?.default_model || Object.values(modelsDict || {}).flat()[0] || '',
           ai_prompt: '请尊重原意，保持原有格式不变，用简体中文重写下面的内容：',
           is_summary: false,
         }
@@ -501,6 +502,15 @@ export default function RulesPage() {
                     checked={detail.enable_forward}
                     onCheckedChange={val => saveField('enable_forward', val)}
                   />
+                  <FormSwitch
+                    label="采集机会原文"
+                    description="只保存一次原文，供定时机会任务使用；不自动开启直转或旧总结。迁移后不再向旧总结表写入新消息。"
+                    checked={detail.enable_collect}
+                    onCheckedChange={val => saveField('enable_collect', val)}
+                  />
+                  {detail.enable_collect && detail.is_summary && (
+                    <p style={{ color: 'var(--color-warning)' }}>旧总结仍开启：已有待总结消息仍可能被旧任务发送，请在正式切换时单独停用。</p>
+                  )}
                   <FormSwitch
                     label="使用 Bot 转发"
                     description="启用官方 Telegram Bot 进行推送；关闭则使用 Userbot 直接发送"

@@ -9,8 +9,9 @@ import RssPage from './pages/RssPage'
 import AiSandboxPage from './pages/AiSandboxPage'
 import MonitorPage from './pages/MonitorPage'
 import TgPage from './pages/TgPage'
+import AlphaPage from './pages/AlphaPage'
 
-type TabId = 'rss' | 'rules' | 'ai' | 'monitor' | 'tg'
+type TabId = 'rss' | 'rules' | 'ai' | 'monitor' | 'tg' | 'alpha'
 
 interface TabDef {
   id: TabId
@@ -21,6 +22,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { id: 'rules', label: '规则设置', icon: <Settings size={16} /> },
   { id: 'tg', label: 'TG 管理', icon: <Send size={16} /> },
+  { id: 'alpha', label: '机会草稿', icon: <Cpu size={16} /> },
   { id: 'rss', label: 'RSS 管理', icon: <Rss size={16} /> },
   { id: 'ai', label: 'AI 沙盒', icon: <Cpu size={16} /> },
   { id: 'monitor', label: '运维监控', icon: <Activity size={16} /> },
@@ -165,6 +167,7 @@ export default function App() {
       <main className="main-content">
         {activeTab === 'rules' && <RulesPage />}
         {activeTab === 'tg' && <TgPage />}
+        {activeTab === 'alpha' && <AlphaPage />}
         {activeTab === 'rss' && <RssPage />}
         {activeTab === 'ai' && <AiSandboxPage />}
         {activeTab === 'monitor' && <MonitorPage />}

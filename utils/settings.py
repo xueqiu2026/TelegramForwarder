@@ -50,7 +50,7 @@ def load_ai_models(type="list"):
         return AI_MODELS_CONFIG
     
     # 默认返回模型列表
-    return ["gpt-5.5", "gemini-3.5-flash", "claude-fable-5"]
+    return [model for models in AI_MODELS_CONFIG.values() for model in models]
 
 def load_summary_times():
     """加载总结时间列表"""
@@ -114,3 +114,15 @@ def load_media_extensions():
     except (FileNotFoundError, IOError) as e:
         logger.warning(f"media_extensions.txt 加载失败: {e}，使用默认扩展名")
     return ['无扩展名','txt','jpg','png','gif','mp4','mp3','wav','ogg','flac','aac','wma','m4a','m4v','mov','avi','mkv','webm','mpg','mpeg','mpe','mp3','mp2','m4a','m4p','m4b','m4r','m4v','mpg','mpeg','mp2','mp3','mp4','mpc','oga','ogg','wav','wma','3gp','3g2','3gpp','3gpp2','amr','awb','caf','flac','m4a','m4b','m4p','oga','ogg','opus','spx','vorbis','wav','wma','webm','aac','ac3','dts','dtshd','flac','mp3','mp4','m4a','m4b','m4p','oga','ogg','wav','wma','webm','aac','ac3','dts','dtshd','flac','mp3','mp4','m4a','m4b','m4p','oga','ogg','wav','wma','webm']
+
+def get_default_ai_model(provider=None):
+    """Use the configured default only when it belongs to the current catalog."""
+    catalog = load_ai_models("dict")
+    models = (catalog.get(provider, []) if provider else
+              [model for group in catalog.values() for model in group])
+    configured = os.getenv('DEFAULT_AI_MODEL', '')
+    if configured in models:
+        return configured
+    if not models:
+        raise ValueError('未配置可用AI模型')
+    return models[0]

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Enum, UniqueConstraint, inspect, text, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Enum, UniqueConstraint, inspect, text, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
 import datetime
 
@@ -6,6 +6,7 @@ from sqlalchemy.orm import relationship, sessionmaker
 from enums.enums import ForwardMode, PreviewMode, MessageMode, AddMode, HandleMode
 import logging
 import os
+from functools import lru_cache
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -81,6 +82,7 @@ class ForwardRule(Base):
     # 同步功能相关
     enable_sync = Column(Boolean, default=False)  # 是否启用规则同步功能
     enable_forward = Column(Boolean, default=True)  # 是否启用实时直转发
+    enable_collect = Column(Boolean, default=False, nullable=False, server_default='false')
 
     # 添加唯一约束
     __table_args__ = (
@@ -98,6 +100,96 @@ class ForwardRule(Base):
     rule_syncs = relationship('RuleSync', back_populates='rule', cascade="all, delete-orphan")
     push_config = relationship('PushConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
     forwarded_messages = relationship('ForwardedMessage', back_populates='rule', cascade="all, delete-orphan")
+
+class CollectedMessage(Base):
+    __tablename__ = 'collected_messages'
+    id = Column(Integer, primary_key=True)
+    source_id = Column(String, nullable=False, index=True)
+    message_id = Column(Integer, nullable=False)
+    source_name = Column(String, default='')
+    username = Column(String, default='')
+    published_at = Column(DateTime, nullable=False, index=True)
+    edited_at = Column(DateTime)
+    body = Column(String, default='')
+    entities = Column(JSON, default=list)
+    media = Column(JSON, default=dict)
+    grouped_id = Column(String)
+    reply_id = Column(Integer)
+    source_url = Column(String, default='')
+    content_hash = Column(String, nullable=False, index=True)
+    revision = Column(Integer, default=1, nullable=False)
+    analysis_status = Column(String, default='pending', nullable=False, index=True)
+    analysis = Column(JSON)
+    error = Column(String)
+    analysis_version = Column(String)
+    usage = Column(JSON, default=dict)
+    __table_args__ = (UniqueConstraint('source_id', 'message_id', name='unique_collected_source_message'),)
+
+
+class AlphaEvent(Base):
+    __tablename__ = 'alpha_events'
+    id = Column(Integer, primary_key=True)
+    project = Column(String, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    stage = Column(String, nullable=False)
+    sources = Column(JSON, default=list)
+    content_type = Column(String)
+    editorial = Column(JSON, default=dict)
+    draft_zh = Column(String)
+    draft_status = Column(String, default='pending', nullable=False)
+    closed = Column(Boolean, default=False, nullable=False)
+    deadline = Column(DateTime)
+    draft_hash = Column(String)
+    draft_usage = Column(JSON, default=dict)
+    error = Column(String)
+    first_seen = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AlphaCollectionState(Base):
+    __tablename__ = 'alpha_collection_state'
+    source_id = Column(String, primary_key=True)
+    enabled_at = Column(DateTime, nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    scanned_id = Column(Integer, default=0, nullable=False)
+    scanned_at = Column(DateTime)
+    error = Column(String)
+
+
+class AlphaProjectAlias(Base):
+    __tablename__ = 'alpha_project_aliases'
+    alias = Column(String, primary_key=True)
+    project = Column(String, nullable=False)
+    evidence = Column(String, nullable=False)
+
+
+class AlphaJob(Base):
+    """Independent draft job configuration and last run, shared with the Web process."""
+    __tablename__ = 'alpha_job'
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    model = Column(String, default='')
+    publish_enabled = Column(Boolean, default=False, nullable=False)
+    target_id = Column(String, default='')
+    last_slot = Column(String)
+    last_run = Column(DateTime)
+    status = Column(String, default='idle')
+    result = Column(JSON, default=dict)
+    error = Column(String)
+
+
+class AlphaPublication(Base):
+    __tablename__ = 'alpha_publications'
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, nullable=False, index=True)
+    target_id = Column(String, nullable=False)
+    draft_hash = Column(String, nullable=False)
+    parts = Column(JSON, nullable=False)
+    status = Column(String, default='queued', nullable=False)
+    error = Column(String)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint('event_id', 'target_id', name='unique_alpha_event_target'),)
+
 
 class Keyword(Base):
     __tablename__ = 'keywords'
@@ -442,6 +534,7 @@ def migrate_db(engine):
         'media_allow_text': 'ALTER TABLE forward_rules ADD COLUMN media_allow_text BOOLEAN DEFAULT FALSE',
         'enable_ai_upload_image': 'ALTER TABLE forward_rules ADD COLUMN enable_ai_upload_image BOOLEAN DEFAULT FALSE',
         'enable_forward': 'ALTER TABLE forward_rules ADD COLUMN enable_forward BOOLEAN DEFAULT TRUE',
+        'enable_collect': 'ALTER TABLE forward_rules ADD COLUMN enable_collect BOOLEAN NOT NULL DEFAULT FALSE',
         'summary_prompt_b': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt_b VARCHAR DEFAULT NULL',
         'summary_prompt_d': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt_d VARCHAR DEFAULT NULL',
     }
@@ -552,17 +645,33 @@ def init_db():
 
     # 然后进行必要的迁移
     migrate_db(engine)
+    columns = {c['name'] for c in inspect(engine).get_columns('alpha_job')}
+    with engine.begin() as connection:
+        for name, definition in [('publish_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+                                 ('target_id', "VARCHAR DEFAULT ''")]:
+            if name not in columns:
+                connection.execute(text(f'ALTER TABLE alpha_job ADD COLUMN {name} {definition}'))
+
+    columns = {c['name'] for c in inspect(engine).get_columns('alpha_events')}
+    with engine.begin() as connection:
+        for name, definition in [('content_type', 'VARCHAR'), ('editorial', 'JSON')]:
+            if name not in columns:
+                connection.execute(text(f'ALTER TABLE alpha_events ADD COLUMN {name} {definition}'))
 
     return engine
+
+@lru_cache(maxsize=8)
+def _session_factory(database_url):
+    # Share the engine within each process instead of opening a new pool per message/query.
+    return sessionmaker(bind=create_engine(database_url))
+
 
 def get_session():
     """创建会话工厂"""
     DATABASE_URL = os.getenv('DATABASE_URL')
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL 环境变量未设置")
-    engine = create_engine(DATABASE_URL)
-    Session = sessionmaker(bind=engine)
-    return Session()
+    return _session_factory(DATABASE_URL)()
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)

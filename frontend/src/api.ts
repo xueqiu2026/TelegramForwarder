@@ -6,7 +6,7 @@ import type {
 
 // ── Axios 实例 (BUG-03 修复: withCredentials) ─────────────
 const api = axios.create({
-  baseURL: '/api',         // Vite proxy 转发到 8000
+  baseURL: '/tg/api',         // 生产环境 Nginx 反代到 8000
   withCredentials: true,   // 携带 Cookie
   headers: { 'Content-Type': 'application/json' },
 })
@@ -23,7 +23,7 @@ export const authApi = {
   logout: () => api.post('/auth/logout').then(r => r.data),
   me: () => api.get('/auth/me').then(r => r.data),
   changePassword: (data: FormData) =>
-    axios.post('/rss/change_password', data, { withCredentials: true }).then(r => r.data),
+    axios.post('/tg/rss/change_password', data, { withCredentials: true }).then(r => r.data),
 }
 
 // ── Chat ──────────────────────────────────────────────────
@@ -101,6 +101,7 @@ export const summariesApi = {
     if (search) params.set('search', search)
     return api.get<SummaryResponse>(`/summaries?${params}`).then(r => r.data)
   },
+  triggerNow: () => api.post('/trigger-summary-now').then(r => r.data),
 }
 
 // ── AI Sandbox ────────────────────────────────────────────

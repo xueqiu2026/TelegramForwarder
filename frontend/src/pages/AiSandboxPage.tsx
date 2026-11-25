@@ -30,7 +30,7 @@ export default function AiSandboxPage() {
     }
   }
 
-  const [model, setModel] = useState('gpt-5.5')
+  const [model, setModel] = useState('')
   
   // ── A/B Prompt ──
   const [promptA, setPromptA] = useState('请对以下转发的消息进行简明扼要的中文总结：')

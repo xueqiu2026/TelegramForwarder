@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import pytz
-from models.models import get_session, ForwardRule, SummaryHistory, PushConfig, ForwardedMessage, Chat
+from models.models import get_session, ForwardRule, SummaryHistory, PushConfig, ForwardedMessage, Chat, AlphaJob
 import logging
 import os
 import apprise
@@ -125,6 +125,11 @@ class SummaryScheduler:
         """执行按目标群组的聚合总结"""
         session = get_session()
         try:
+            from alpha.storage import source_id
+            alpha_config = session.get(AlphaJob, 1)
+            if alpha_config and alpha_config.target_id and source_id(target_chat_id) == alpha_config.target_id:
+                logger.info('该目标已切换机会流水线，旧总结入口停用')
+                return
             target_chat_id_int = int(target_chat_id)
             if not str(target_chat_id_int).startswith('-'):
                 target_chat_id_int = int(f'-100{target_chat_id}')

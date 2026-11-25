@@ -3,6 +3,7 @@ from openai import AsyncOpenAI
 from .base import BaseAIProvider
 import os
 import logging
+from utils.settings import get_default_ai_model
 from .openai_base_provider import OpenAIBaseProvider
 
 logger = logging.getLogger(__name__)
@@ -11,7 +12,7 @@ class OpenAIProvider(OpenAIBaseProvider):
     def __init__(self):
         super().__init__(
             env_prefix='OPENAI',
-            default_model='gpt-5.4',
+            default_model=get_default_ai_model('gpt'),
             default_api_base='https://api.openai.com/v1'
         )
 

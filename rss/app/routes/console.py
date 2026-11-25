@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import re
+from utils.settings import get_default_ai_model
 
 logger = logging.getLogger(__name__)
 
@@ -224,16 +225,15 @@ def delete_chat(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
-        # 检查是否被规则引用
-        has_ref = db.query(ForwardRule).filter(
-            (ForwardRule.source_chat_id == id) | (ForwardRule.target_chat_id == id)
-        ).first()
-        if has_ref:
-            raise HTTPException(status_code=400, detail="该频道已被转发规则引用，无法删除")
-            
         chat = db.query(Chat).filter(Chat.id == id).first()
         if not chat:
             raise HTTPException(status_code=404, detail="Chat 记录不存在")
+        if db.query(ForwardRule).filter(ForwardRule.target_chat_id == id).first():
+            raise HTTPException(status_code=400, detail="该群组仍是转发目标，请先修改或删除指向它的规则")
+        rules = db.query(ForwardRule).filter(ForwardRule.source_chat_id == id).all()
+        for rule in rules:
+            delete_source_rule(db, rule)
+        db.flush()
         db.delete(chat)
         db.commit()
         return {"status": "success"}
@@ -378,6 +378,7 @@ def get_rules(user=Depends(get_current_user)):
                 "target_chat_name": r.target_chat.name if r.target_chat else "Unknown",
                 "enable_rule": r.enable_rule,
                 "enable_forward": getattr(r, 'enable_forward', True),
+                "enable_collect": r.enable_collect,
                 "is_ai": r.is_ai,
                 "is_summary": r.is_summary,
                 "summary_time": r.summary_time
@@ -397,7 +398,8 @@ def create_rule(data: Dict, user=Depends(get_current_user)):
             target_chat_id=data.get("target_chat_id"),
             forward_mode=data.get("forward_mode", "BLACKLIST"),
             use_bot=data.get("use_bot", True),
-            enable_rule=data.get("enable_rule", True)
+            enable_rule=data.get("enable_rule", True),
+            enable_collect=False
         )
         db.add(rule)
         db.commit()
@@ -438,6 +440,7 @@ def get_rule_detail(id: int, user=Depends(get_current_user)):
             "add_mode": r.add_mode.name if r.add_mode else "BLACKLIST",
             "enable_rule": r.enable_rule,
             "enable_forward": getattr(r, 'enable_forward', True),
+            "enable_collect": r.enable_collect,
             "handle_mode": r.handle_mode.name if r.handle_mode else "FORWARD",
             "enable_comment_button": r.enable_comment_button,
             # AI
@@ -481,10 +484,12 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
             "enable_ai_upload_image", "is_summary", "summary_time", "summary_prompt",
             "summary_prompt_b", "summary_prompt_d",
             "is_keyword_after_ai", "is_top_summary", "enable_push", "enable_only_push",
-            "only_rss", "enable_sync", "enable_forward"
+            "only_rss", "enable_sync", "enable_forward", "enable_collect"
         ]:
             if field in data:
                 val = data[field]
+                if field == 'enable_collect' and type(val) is not bool:
+                    raise HTTPException(status_code=400, detail='enable_collect 必须为布尔值')
                 # 枚举字段需要从字符串转为枚举实例
                 if field in ENUM_MAP and isinstance(val, str):
                     try:
@@ -500,6 +505,8 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
                             )
                 setattr(r, field, val)
 
+        from alpha.storage import sync_sources
+        sync_sources(db)
         db.commit()
         return {"status": "success"}
     except HTTPException:
@@ -511,6 +518,17 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
         db.close()
 
 
+def delete_source_rule(db, rule):
+    # 留存历史总结；关键词没有配置 ORM 级联，需要显式删除。
+    db.query(SummaryHistory).filter(SummaryHistory.rule_id == rule.id).update(
+        {SummaryHistory.rule_id: None}, synchronize_session=False
+    )
+    db.query(Keyword).filter(Keyword.rule_id == rule.id).delete(synchronize_session=False)
+    from models.models import RuleSync
+    db.query(RuleSync).filter(RuleSync.sync_rule_id == rule.id).delete(synchronize_session=False)
+    db.delete(rule)
+
+
 @router.delete("/rules/{id}")
 def delete_rule(id: int, user=Depends(get_current_user)):
     require_auth(user)
@@ -519,7 +537,7 @@ def delete_rule(id: int, user=Depends(get_current_user)):
         r = db.query(ForwardRule).filter(ForwardRule.id == id).first()
         if not r:
             raise HTTPException(status_code=404, detail="Rule not found")
-        db.delete(r)
+        delete_source_rule(db, r)
         db.commit()
         return {"status": "success"}
     except Exception as e:
@@ -751,7 +769,7 @@ async def run_sandbox_test(data: Dict, user=Depends(get_current_user)):
     """离线测试沙盒运行"""
     require_auth(user)
     prompt = data.get("prompt")
-    model = data.get("model", "gemini-2.5-flash")
+    model = data.get("model") or get_default_ai_model()
     test_message = data.get("test_message", "这是一条测试消息。")
 
     try:
@@ -1099,7 +1117,7 @@ def sync_rule_to_all(id: int, data: Dict = None, user=Depends(get_current_user))
             raise HTTPException(status_code=404, detail="Source rule not found")
         
         # 始终排除的字段
-        exclude_fields = {"id", "source_chat_id", "target_chat_id", "created_at"}
+        exclude_fields = {"id", "source_chat_id", "target_chat_id", "created_at", "enable_collect"}
         
         # 如果前端传了 fields 列表，则只同步指定字段；否则全量同步
         requested_fields = (data or {}).get("fields", None) if data else None
@@ -1283,7 +1301,7 @@ def aggregate_messages(data: Dict, user=Depends(get_current_user)):
 @router.post("/sandbox/analyze-channels")
 async def analyze_channels(data: Dict, user=Depends(get_current_user)):
     require_auth(user)
-    model = data.get("model", "gpt-5.5")
+    model = data.get("model") or get_default_ai_model()
     
     import json
     import os

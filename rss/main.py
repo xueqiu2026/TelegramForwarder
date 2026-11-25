@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from rss.app.routes.auth import router as auth_router
 from rss.app.routes.console import router as console_router
+from rss.app.routes.alpha import router as alpha_router
 from rss.app.api.endpoints import feed
 import uvicorn
 import logging
@@ -32,6 +33,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(feed.router)
 app.include_router(console_router)
+app.include_router(alpha_router)
 
 
 # 根路由重定向到新前端

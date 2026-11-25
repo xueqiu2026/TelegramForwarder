@@ -15,6 +15,21 @@ import mimetypes
 
 logger = logging.getLogger(__name__)
 
+
+# P14: 语言检测辅助函数
+def _is_chinese_dominant(text: str, threshold: float = 0.3) -> bool:
+    """判断文本是否以中文为主。
+    CJK 字符占可见字符比例 >= threshold 则视为中文内容，跳过翻译。
+    """
+    if not text:
+        return True
+    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    visible = sum(1 for c in text if not c.isspace())
+    if visible == 0:
+        return True
+    return (cjk_count / visible) >= threshold
+
+
 class AIFilter(BaseFilter):
     """
     AI处理过滤器，使用AI处理消息文本
@@ -39,6 +54,12 @@ class AIFilter(BaseFilter):
             if not rule.is_ai:
                 logger.info("AI处理未开启，返回原始消息")
                 return True
+
+            # P14: 语言检测 - 中文消息跳过 AI 翻译，只翻译纯外语消息
+            if rule.ai_prompt and '翻译' in rule.ai_prompt:
+                if _is_chinese_dominant(message_text):
+                    logger.debug("P14: 消息为中文内容，跳过翻译")
+                    return True
 
             # 处理媒体组消息
             if context.is_media_group:

@@ -7,16 +7,17 @@ logger = logging.getLogger(__name__)
 # 默认AI模型配置(JSON格式)
 AI_MODELS_CONFIG = {
     "gpt": [
-        "gpt-5.5",
-        "gpt-5.4"
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-astra",
+        "gpt-6-sol"
     ],
     "gemini": [
         "gemini-3.5-flash",
         "gemini-3.1-pro"
     ],
     "grok": [
-        "grok-4.3-latest",
-        "grok-build-0.1"
+        "grok-4.7"
     ],
     "deepseek": [
         "deepseek-v4-pro-260425",

@@ -1,0 +1,16 @@
+{
+  "alpha/editorial.py": "cac0b405d1284f127c6ceec037870369827822a1374f053f2536210ceb3cc9b7",
+  "alpha/pipeline.py": "e1a9ed3a35f90234c03a51c23c7c125738512a49d524f133250d3276467dc41b",
+  "alpha/storage.py": "bcdf0c2be13726af804a43456b54dc40437bc7ecdd61e7ae7f293130bd00a372",
+  "alpha/publish.py": "81e3c5810d9e6e35d6f42dddae5a583608c576fdd8beee08b8ae78855c353565",
+  "models/models.py": "b4d8fca29d4e7c42d9b52d12837645de94e65efe266c6d5fba8134257ad794a8",
+  "frontend/src/pages/AlphaPage.tsx": "8cb60a0fc2dff78d6eb300fe7cb42f285d62dd74a74e20c2029339033ed8f246",
+  "tests/test_alpha.py": "be2441fe3ce1d4d65322b82202bfafcd198bc2c0f78dee76a68bb77f0c31f3f6",
+  "frontend/dist/favicon.svg": "61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66",
+  "frontend/dist/icons.svg": "b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a",
+  "frontend/dist/index.html": "2f5dfe25524c4c6393e3151580e4635d854eaae040436194c1e9524be3cbfeab",
+  "frontend/dist/assets/index-BZ3xCbzt.css": "226fa94dd7f86eacd4e10cf97bd2d0ec84100cb49f10c158410b2bf8a5ca9052",
+  "frontend/dist/assets/index-DIZpCi_W.js": "dd7730e04b8b669d763b06fd27938a79a91b55de66926bd575481df53ec91a7b",
+  "alpha/prompts.py": "be0a31932d2e429e124dbf813f8091318e475274c90616a93febbf15c6236035",
+  "alpha/public_copy.py": "1a77a0c5872155716f92af4625cb4be39bc0394f89b6a47a89506f50b6579da8"
+}

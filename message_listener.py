@@ -59,6 +59,15 @@ async def setup_listeners(user_client, bot_client):
     @user_client.on(events.NewMessage(func=not_from_bot))
     async def user_message_handler(event):
         await handle_user_message(event, user_client, bot_client)
+
+    @bot_client.on(events.MessageEdited(func=not_from_bot))
+    @user_client.on(events.MessageEdited(func=not_from_bot))
+    async def collected_message_edited(event):
+        from alpha.storage import collect_event
+        try:
+            await collect_event(event)
+        except Exception:
+            logger.exception('机会原文编辑采集失败，保留原有发送链路')
     
     # 机器人客户端监听器 - 使用过滤器
     @bot_client.on(events.NewMessage(func=not_from_bot))
@@ -73,6 +82,12 @@ async def handle_user_message(event, user_client, bot_client):
     """处理用户客户端收到的消息"""
     # logger.info("handle_user_message:开始处理用户消息")
     
+    # Collect before legacy album de-duplication, filters, AI and forwarding.
+    from alpha.storage import collect_event, source_variants
+    try:
+        await collect_event(event)
+    except Exception:
+        logger.exception('机会原文采集失败，将由历史补采续接')
     chat = await event.get_chat()
     chat_id = abs(chat.id)
     # logger.info(f"handle_user_message:获取到聊天ID: {chat_id}")
@@ -118,7 +133,7 @@ async def handle_user_message(event, user_client, bot_client):
     try:
         # 查询源聊天
         source_chat = session.query(Chat).filter(
-            Chat.telegram_chat_id == str(chat_id)
+            Chat.telegram_chat_id.in_(source_variants(event.chat_id))
         ).first()
         
         if not source_chat:
@@ -175,6 +190,11 @@ async def handle_user_message(event, user_client, bot_client):
 
 async def handle_bot_message(event, bot_client):
     """处理机器人客户端收到的消息（命令）"""
+    from alpha.storage import collect_event
+    try:
+        await collect_event(event)
+    except Exception:
+        logger.exception('机器人入站原文采集失败，保留原有命令处理')
     try:
             
         # logger.info("handle_bot_message:开始处理机器人消息")

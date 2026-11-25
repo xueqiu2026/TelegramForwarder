@@ -59,10 +59,11 @@ export default function TgPage() {
   }
 
   // 执行删除
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (chat: ChatDetail) => {
+    if (chat.source_rule_count > 0 && !window.confirm(`删除“${chat.name || chat.telegram_chat_id}”及其 ${chat.source_rule_count} 条来源规则？将停止相关转发并移除规则配置和待总结消息，历史总结保留。此操作不会退出 Telegram 频道。`)) return
     setDeleting(true)
     try {
-      await chatsApi.delete(id)
+      await chatsApi.delete(chat.id)
       setDeleteConfirmId(null)
       mutateChats()
     } catch (err: any) {
@@ -282,18 +283,18 @@ export default function TgPage() {
 
                   {/* 操作 */}
                   <td style={tdStyle} width="120">
-                    {inUse ? (
+                    {c.target_rule_count > 0 ? (
                       <button 
                         style={{ ...iconBtn, opacity: 0.4, cursor: 'not-allowed' }} 
                         disabled 
-                        title="该频道已被转发规则引用，无法删除"
+                        title="该群组仍是转发目标，请先修改或删除指向它的规则"
                       >
                         <Trash2 size={14} />
                       </button>
                     ) : deleteConfirmId === c.id ? (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                         <button 
-                          onClick={() => handleDelete(c.id)} 
+                          onClick={() => handleDelete(c)} 
                           disabled={deleting}
                           style={{ ...iconBtn, color: 'var(--color-danger)', borderColor: 'rgba(239,68,68,0.2)' }} 
                           title="确认删除"

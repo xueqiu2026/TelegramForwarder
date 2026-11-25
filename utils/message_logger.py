@@ -24,6 +24,11 @@ def log_forwarded_message(rule, event, source_chat_name=None, is_summarized=Fals
             logger.error(f"消息落库失败：未在数据库中找到对应的规则 ID={rule.id}")
             return
 
+        from alpha.storage import is_migrated
+        if is_migrated(session, db_rule):
+            # Persistent enrollment prevents this path reactivating when collection is switched off.
+            return
+
         record = ForwardedMessage(
             rule_id=db_rule.id,
             source_chat_id=db_rule.source_chat.telegram_chat_id,
