@@ -26,12 +26,14 @@ async def resolve_photo(client, photo):
     return types.InputMediaPhoto(utils.get_input_photo(original.photo))
 
 
-async def deliver(db, client, config, publication, peer, draft_hash, draft, photo=None):
+async def deliver(db, client, config, publication, peer, draft_hash, draft, photo=None, read_client=None):
     result = {'sent': 0, 'errors': 0, 'unknown': 0}
     parts = [dict(p) for p in publication.parts]
     # An interrupted/ambiguous send is reconciled against actual history before anything else.
     if any(p['status'] in {'sending', 'unknown'} for p in parts):
-        recent = await client.get_messages(peer, limit=100)
+        reader = read_client or client
+        read_peer = await reader.get_input_entity(utils.get_peer_id(peer)) if read_client else peer
+        recent = await reader.get_messages(read_peer, limit=100)
         for part in parts:
             if part['status'] not in {'sending', 'unknown'}:
                 continue

@@ -18,7 +18,7 @@ def latest_slot(now, hours=(7, 13, 19, 22)):
     return max(s for s in slots if s <= now).isoformat()
 
 
-async def scheduler_loop(client, business='alpha'):
+async def scheduler_loop(client, business='alpha', publisher=None):
     if business == 'ai':
         from ai_digest.pipeline import job as load_job, run_pipeline as execute
     else:
@@ -35,7 +35,10 @@ async def scheduler_loop(client, business='alpha'):
                 db.close()
             slot = latest_slot(datetime.now(TZ), hours)
             if enabled and last_slot != slot:
-                await execute(client=client, slot=slot)
+                if business == 'ai':
+                    await execute(client=client, slot=slot, publisher=publisher)
+                else:
+                    await execute(client=client, slot=slot)
         except AlreadyRunning:
             pass
         except Exception:

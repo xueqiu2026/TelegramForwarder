@@ -86,7 +86,7 @@ async def start_internal_server(user_client, bot_client):
         from ai_digest.pipeline import run_pipeline as run_ai_pipeline
         async def execute():
             try:
-                await run_ai_pipeline(client=user_client)
+                await run_ai_pipeline(client=user_client, publisher=bot_client)
             except AlreadyRunning:
                 logger.info('AI任务已有其他入口在执行')
             except Exception:
@@ -413,7 +413,7 @@ async def start_clients():
         # 创建并启动调度器
         from alpha.scheduler import scheduler_loop
         alpha_task = asyncio.create_task(scheduler_loop(user_client))
-        ai_task = asyncio.create_task(scheduler_loop(user_client, "ai"))
+        ai_task = asyncio.create_task(scheduler_loop(user_client, "ai", publisher=bot_client))
         from alpha.mirror import mirror_loop
         mirror_task = asyncio.create_task(mirror_loop(bot_client, user_client))
         

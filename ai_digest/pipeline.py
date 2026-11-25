@@ -253,7 +253,7 @@ def validate_copy(text, rows):
             raise ValueError('公开稿包含采集署名')
 
 
-async def publish(db, client, config, model, now, ask):
+async def publish(db, client, config, model, now, ask, read_client=None):
     from delivery import make_parts, deliver
     result = {'sent': 0, 'errors': 0, 'unknown': 0}
     db.refresh(config)
@@ -323,7 +323,7 @@ async def publish(db, client, config, model, now, ask):
             if sent.draft_hash != item.output_hash and not any(p['status'] in {'sent', 'sending', 'unknown'} for p in sent.parts):
                 sent.sources = list(item.sources)
                 db.commit()
-            outcome = await deliver(db, client, config, sent, peer, item.output_hash, item.output_zh)
+            outcome = await deliver(db, client, config, sent, peer, item.output_hash, item.output_zh, read_client=read_client)
             for key in result:
                 result[key] += outcome[key]
         except Exception as exc:
@@ -338,7 +338,7 @@ async def publish(db, client, config, model, now, ask):
     return result
 
 
-async def run_pipeline(client=None, model=None, ask=None, now=None, slot=None):
+async def run_pipeline(client=None, model=None, ask=None, now=None, slot=None, publisher=None):
     now = now or datetime.utcnow()
     ask = ask or call_model
     with RunLock('ai'):
@@ -359,7 +359,8 @@ async def run_pipeline(client=None, model=None, ask=None, now=None, slot=None):
                 raise ValueError('请选择AI版块模型')
             await analyze(db, model, now, ask, lower=lower)
             config = job(db)
-            delivered = await publish(db, client, config, model, now, ask)
+            delivered = await publish(db, publisher or client, config, model, now, ask,
+                                      read_client=client if publisher is not None else None)
             errors = db.query(AIProcessing).filter_by(status='failed').count()
             config.status = 'partial' if failures or errors or delivered['errors'] or delivered['unknown'] else 'success'
             config.result = {'recovery_errors': failures, 'analysis_errors': errors, 'publish': delivered,

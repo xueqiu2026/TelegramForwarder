@@ -368,6 +368,10 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         config.model, config.publish_enabled = 'fixture', True
         self.db.commit()
         client = Client()
+        class ReadOnlyUser(Client):
+            async def __call__(self, request):
+                raise AssertionError('采集账号没有频道发布权限，必须使用BOT')
+        reader = ReadOnlyUser()
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
@@ -375,7 +379,7 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         app.include_router(router)
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(username='test')
         with patch.dict(os.environ, {'INTERNAL_BRIDGE_PORT': str(port)}), patch('ai_digest.pipeline.call_model', self.ask):
-            await main.start_internal_server(client, client)
+            await main.start_internal_server(reader, client)
             try:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as web:
                     accepted = await web.post('/api/ai-digest/run')
@@ -445,6 +449,37 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW)
         self.assertEqual(len(self.calls), count)
         self.assertEqual(len(client.sent), 1)
+
+    async def test_bot_unknown_receipt_uses_user_history_without_resending(self):
+        from telethon.types import InputPeerChannel
+        self.store()
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        class Bot(Client):
+            async def __call__(self, request):
+                self.sent.append(request)
+                raise TimeoutError('receipt lost')
+            async def get_messages(self, *args, **kwargs):
+                raise AssertionError('BOT不能承担历史核对')
+        class Reader(Client):
+            async def get_messages(self, peer, **kwargs):
+                if isinstance(peer, InputPeerChannel):
+                    return [SimpleNamespace(message='Dahl新用户注册可获1亿Token的API试用额度。',
+                        id=99, date=NOW.replace(tzinfo=timezone.utc))]
+                return []
+        bot, user = Bot(), Reader()
+        await run_pipeline(client=user, publisher=bot, model='fixture', ask=self.ask, now=NOW)
+        self.db.expire_all()
+        self.assertEqual(self.db.query(AIPublication).one().status, 'unknown')
+        calls = len(self.calls)
+        await run_pipeline(client=user, publisher=bot, model='fixture', ask=self.ask, now=NOW)
+        self.db.expire_all()
+        receipt = self.db.query(AIPublication).one()
+        self.assertEqual(receipt.status, 'sent')
+        self.assertEqual(receipt.parts[0]['message_id'], 99)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(len(self.calls), calls)
 
     async def test_business_schedules_default_equal_and_configure_independently(self):
         from rss.app.routes.ai_digest import configure, Config
