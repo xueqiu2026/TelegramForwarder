@@ -1,4 +1,4 @@
-from telethon import TelegramClient, types
+from telethon import TelegramClient, types, utils
 from telethon.tl.types import BotCommand
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from models.models import init_db
@@ -232,7 +232,7 @@ async def start_message_poller(user_client, bot_client, source_ids):
             # 只轮询那些【不在】MessageBox 中的源频道
             poll_targets = [
                 (chat_id_str, name) for chat_id_str, name in {**dict(source_ids), **dynamic}.items()
-                if int(chat_id_str) not in mb_map
+                if utils.resolve_id(int(chat_id_str))[0] not in mb_map
             ]
             
             # 若所有频道均已通过实时 updates 覆盖，poller 进行休眠并重新检测
@@ -326,11 +326,11 @@ async def start_clients():
                 source_chats = db_session.query(Chat.telegram_chat_id, Chat.name).join(
                     ForwardRule, Chat.id == ForwardRule.source_chat_id
                 ).filter(ForwardRule.enable_rule == True).distinct().all()
-                from collection import sync_sources
+                from collection import sync_sources, source_id
                 sync_sources(db_session)
                 db_session.commit()
                 from models.models import BusinessSource
-                source_ids = list({**{c.telegram_chat_id: c.name for c in source_chats},
+                source_ids = list({**{source_id(c.telegram_chat_id): c.name for c in source_chats},
                                    **{s.source_id: s.name for s in db_session.query(BusinessSource).filter_by(active=True)}}.items())
             finally:
                 db_session.close()
@@ -352,7 +352,8 @@ async def start_clients():
             missing = []
             for chat_id_str, name in source_ids:
                 cid = int(chat_id_str)
-                if cid in mb_map:
+                channel_id = utils.resolve_id(cid)[0]
+                if channel_id in mb_map:
                     continue
                 missing.append(name)
                 try:
@@ -370,9 +371,9 @@ async def start_clients():
                                 logger.warning(f'自动加入频道失败: {name} ({chat_id_str}), 错误: {je}')
 
                         user_client._mb_entity_cache.extend([], [entity])
-                        real_pts = session_pts_map.get(cid, 1)
+                        real_pts = session_pts_map.get(channel_id, 1)
                         # 1. 在内存 MessageBox 中注册状态，防止 Telethon 底层丢包
-                        user_client._message_box.try_set_channel_state(cid, real_pts)
+                        user_client._message_box.try_set_channel_state(channel_id, real_pts)
                         # 2. 发起 GetChannelDifference 主动差分同步，唤醒 Telegram updates 推送引擎
                         from telethon.tl.functions.updates import GetChannelDifferenceRequest
                         from telethon.tl.types import ChannelMessagesFilterEmpty

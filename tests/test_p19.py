@@ -265,6 +265,20 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
                     with RunLock('ai'):
                         pass
 
+    async def test_startup_recognizes_business_source_in_messagebox(self):
+        from unittest.mock import AsyncMock
+        import main
+        user = SimpleNamespace(start=AsyncMock(), get_me=AsyncMock(return_value=SimpleNamespace(first_name='test', username=None)),
+                               get_dialogs=AsyncMock(return_value=[]), get_entity=AsyncMock(),
+                               _message_box=SimpleNamespace(map={1234567890: object()}))
+        stop = RuntimeError('stop before starting bot')
+        bot = SimpleNamespace(start=AsyncMock(side_effect=stop))
+        with patch.object(main, 'user_client', user), patch.object(main, 'bot_client', bot), \
+             patch.object(main.DBOperations, 'create', AsyncMock(return_value=SimpleNamespace(close=AsyncMock()))):
+            with self.assertRaisesRegex(RuntimeError, 'stop before starting bot'):
+                await main.start_clients()
+        user.get_entity.assert_not_awaited()
+
     async def test_source_union_does_not_enroll_ai_source_in_alpha(self):
         self.db.add(BusinessSource(business='ai', source_id='-1002234567890', enabled_at=NOW-timedelta(days=7)))
         sync_sources(self.db)
