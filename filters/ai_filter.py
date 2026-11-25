@@ -4,7 +4,7 @@ from filters.keyword_filter import KeywordFilter
 from utils.common import check_keywords
 from utils.common import get_main_module
 from ai import get_ai_provider
-from utils.constants import DEFAULT_AI_MODEL,DEFAULT_SUMMARY_PROMPT,DEFAULT_AI_PROMPT
+from utils.constants import DEFAULT_AI_MODEL,DEFAULT_AI_PROMPT
 from datetime import datetime, timedelta
 import asyncio
 import re

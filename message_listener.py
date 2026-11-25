@@ -10,7 +10,6 @@ from telethon.tl.types import ChannelParticipantsAdmins
 from managers.state_manager import state_manager
 from telethon.tl import types
 from filters.process import process_forward_rule
-from utils.message_logger import log_forwarded_message
 # 加载环境变量
 load_dotenv()
 
@@ -63,7 +62,7 @@ async def setup_listeners(user_client, bot_client):
     @bot_client.on(events.MessageEdited(func=not_from_bot))
     @user_client.on(events.MessageEdited(func=not_from_bot))
     async def collected_message_edited(event):
-        from alpha.storage import collect_event
+        from collection import collect_event
         try:
             await collect_event(event)
         except Exception:
@@ -83,7 +82,8 @@ async def handle_user_message(event, user_client, bot_client):
     # logger.info("handle_user_message:开始处理用户消息")
     
     # Collect before legacy album de-duplication, filters, AI and forwarding.
-    from alpha.storage import collect_event, source_variants
+    from collection import collect_event
+    from alpha.storage import source_variants
     try:
         await collect_event(event)
     except Exception:
@@ -170,9 +170,6 @@ async def handle_user_message(event, user_client, bot_client):
             # 实时转发拦截点
             if not getattr(rule, 'enable_forward', True):
                 logger.info(f'规则 {rule.id} 已关闭即时转发，跳过发送')
-                # 即使不转发，启用了总结的规则仍需落库
-                if getattr(rule, 'is_summary', False):
-                    log_forwarded_message(rule, event)
                 continue
                 
             logger.info(f'处理转发规则 ID: {rule.id} (从 {source_chat.name} 转发到: {target_chat.name})')
@@ -190,7 +187,7 @@ async def handle_user_message(event, user_client, bot_client):
 
 async def handle_bot_message(event, bot_client):
     """处理机器人客户端收到的消息（命令）"""
-    from alpha.storage import collect_event
+    from collection import collect_event
     try:
         await collect_event(event)
     except Exception:

@@ -27,8 +27,6 @@ export interface RuleListItem {
   enable_forward: boolean
   enable_collect: boolean
   is_ai: boolean
-  is_summary: boolean
-  summary_time: string | null
 }
 
 export interface RuleDetail {
@@ -58,13 +56,7 @@ export interface RuleDetail {
   ai_model: string | null
   ai_prompt: string | null
   enable_ai_upload_image: boolean
-  is_summary: boolean
-  summary_time: string | null
-  summary_prompt: string | null
-  summary_prompt_b?: string | null
-  summary_prompt_d?: string | null
   is_keyword_after_ai: boolean
-  is_top_summary: boolean
   // 其他
   enable_push: boolean
   enable_only_push: boolean
@@ -124,21 +116,4 @@ export interface RssPattern {
   pattern: string
   pattern_type: 'title' | 'content'
   priority: number
-}
-
-export interface SummaryItem {
-  id: number
-  rule_id: number
-  source_channel_name: string
-  summary_text: string
-  message_count: number
-  time_range_start: string | null
-  time_range_end: string | null
-  ai_model: string | null
-  created_at: string | null
-}
-
-export interface SummaryResponse {
-  total: number
-  data: SummaryItem[]
 }

@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type {
   RuleListItem, RuleDetail, Keyword, ReplaceRule as ReplaceRuleType,
-  PushConfig, MediaTypes, RssConfig, RssPattern, SummaryResponse, Chat, ChatDetail
+  PushConfig, MediaTypes, RssConfig, RssPattern, Chat, ChatDetail
 } from './types'
 
 // ── Axios 实例 (BUG-03 修复: withCredentials) ─────────────
@@ -92,16 +92,6 @@ export const patternsApi = {
 export const regexApi = {
   test: (data: { pattern: string; test_text: string; pattern_type: string }) =>
     api.post('/test-regex', data).then(r => r.data),
-}
-
-// ── Summaries ─────────────────────────────────────────────
-export const summariesApi = {
-  getAll: (page = 1, limit = 10, search?: string) => {
-    const params = new URLSearchParams({ page: String(page), limit: String(limit) })
-    if (search) params.set('search', search)
-    return api.get<SummaryResponse>(`/summaries?${params}`).then(r => r.data)
-  },
-  triggerNow: () => api.post('/trigger-summary-now').then(r => r.data),
 }
 
 // ── AI Sandbox ────────────────────────────────────────────

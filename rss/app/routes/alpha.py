@@ -4,7 +4,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, StrictBool, StrictInt, field_validator
 from .auth import get_current_user
 from .console import require_auth
 from models.models import get_session
@@ -16,6 +16,14 @@ router = APIRouter(prefix='/api/alpha')
 
 class Config(BaseModel):
     enabled: StrictBool
+    schedule_hours: list[StrictInt] | None = None
+
+    @field_validator('schedule_hours')
+    @classmethod
+    def validate_hours(cls, value):
+        if value is not None and (not value or any(h < 0 or h > 23 for h in value) or len(set(value)) != len(value)):
+            raise ValueError('时刻必须为不重复的0–23整数小时')
+        return sorted(value) if value is not None else None
     model: str
 
 
@@ -42,9 +50,11 @@ def configure(data: Config, user=Depends(get_current_user)):
         config = job(db)
         if data.model and data.model not in load_ai_models() and (data.enabled or data.model != config.model):
             raise HTTPException(400, '请选择已配置模型')
-        if data.enabled and not config.enabled:
+        if data.schedule_hours is not None:
+            config.schedule_hours = data.schedule_hours
+        if (data.enabled and not config.enabled) or data.schedule_hours is not None:
             # Enabling is not an immediate AI call; first scheduled time is the next slot.
-            config.last_slot = latest_slot(datetime.now(TZ))
+            config.last_slot = latest_slot(datetime.now(TZ), config.schedule_hours)
         config.enabled, config.model = data.enabled, data.model
         db.commit()
         return {'status': 'success', 'publish': 'enabled' if config.publish_enabled else 'none'}

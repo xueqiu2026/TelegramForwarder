@@ -60,7 +60,7 @@ export default function TgPage() {
 
   // 执行删除
   const handleDelete = async (chat: ChatDetail) => {
-    if (chat.source_rule_count > 0 && !window.confirm(`删除“${chat.name || chat.telegram_chat_id}”及其 ${chat.source_rule_count} 条来源规则？将停止相关转发并移除规则配置和待总结消息，历史总结保留。此操作不会退出 Telegram 频道。`)) return
+    if (chat.source_rule_count > 0 && !window.confirm(`删除“${chat.name || chat.telegram_chat_id}”及其 ${chat.source_rule_count} 条来源规则？将停止相关转发并移除规则配置，独立业务订阅和原文保留。此操作不会退出 Telegram 频道。`)) return
     setDeleting(true)
     try {
       await chatsApi.delete(chat.id)

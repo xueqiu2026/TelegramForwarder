@@ -22,21 +22,11 @@ api_hash = os.getenv('API_HASH')
 phone_number = os.getenv('PHONE_NUMBER')
 
 def get_source_channels():
-    """从数据库获取所有需要总结的源频道"""
+    from models.models import BusinessSource
     session = get_session()
     try:
-        rules = session.query(ForwardRule).filter_by(is_summary=True).all()
-        channels = []
-        seen = set()
-        for rule in rules:
-            chat_id = rule.source_chat.telegram_chat_id
-            if chat_id not in seen:
-                seen.add(chat_id)
-                channels.append({
-                    'chat_id': int(chat_id),
-                    'name': rule.source_chat.name,
-                })
-        return channels
+        sources = {row.source_id: row.name for row in session.query(BusinessSource).filter_by(active=True)}
+        return [{'chat_id': int(sid), 'name': name} for sid, name in sources.items()]
     finally:
         session.close()
 

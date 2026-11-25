@@ -10,7 +10,6 @@ import logging
 import uvicorn
 import multiprocessing
 from models.db_operations import DBOperations
-from scheduler.summary_scheduler import SummaryScheduler
 from scheduler.chat_updater import ChatUpdater
 from handlers.bot_handler import send_welcome_message
 from rss.main import app as rss_app  # noqa: used by health check route
@@ -37,7 +36,6 @@ phone_number = os.getenv('PHONE_NUMBER')
 # 创建 DBOperations 实例
 db_ops = None
 
-scheduler = None
 chat_updater = None
 internal_runner = None
 
@@ -80,6 +78,31 @@ async def start_internal_server(user_client, bot_client):
 
     app.on_cleanup.append(cleanup_alpha)
     app.router.add_post('/alpha-run', run_alpha)
+    ai_runs = set()
+
+    async def run_ai(request):
+        if ai_runs:
+            return web.json_response({'message': 'AI任务正在运行'}, status=409)
+        from ai_digest.pipeline import run_pipeline as run_ai_pipeline
+        async def execute():
+            try:
+                await run_ai_pipeline(client=user_client)
+            except AlreadyRunning:
+                logger.info('AI任务已有其他入口在执行')
+            except Exception:
+                logger.exception('手动AI任务失败，状态已保存')
+        task = asyncio.create_task(execute())
+        ai_runs.add(task)
+        task.add_done_callback(ai_runs.discard)
+        return web.json_response({'status': 'accepted'})
+
+    async def cleanup_ai(app):
+        for task in list(ai_runs):
+            task.cancel()
+        await asyncio.gather(*list(ai_runs), return_exceptions=True)
+
+    app.router.add_post('/ai-digest-run', run_ai)
+    app.on_cleanup.append(cleanup_ai)
     
     async def resolve_handler(request):
         try:
@@ -137,20 +160,8 @@ async def start_internal_server(user_client, bot_client):
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-    async def trigger_summary_handler(request):
-        """通过 bridge 在 main 进程 event loop 中触发总结"""
-        try:
-            global scheduler
-            if not scheduler:
-                return web.json_response({"status": "error", "message": "调度器未初始化"}, status=500)
-            asyncio.create_task(scheduler.execute_all_summaries())
-            return web.json_response({"status": "success", "message": "已在主进程触发聚合总结"})
-        except Exception as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
-
     app.router.add_post("/resolve", resolve_handler)
     app.router.add_get("/health", health_handler)
-    app.router.add_post("/trigger-summary", trigger_summary_handler)
     internal_runner = web.AppRunner(app)
     await internal_runner.setup()
     
@@ -210,11 +221,17 @@ async def start_message_poller(user_client, bot_client, source_ids):
     async def poll_loop():
         from message_listener import handle_user_message
         while True:
+            from models.models import get_session, BusinessSource
+            db = get_session()
+            try:
+                dynamic = {s.source_id: s.name for s in db.query(BusinessSource).filter_by(active=True)}
+            finally:
+                db.close()
             # 动态获取当前 MessageBox 中已激活的频道
             mb_map = getattr(user_client._message_box, 'map', {})
             # 只轮询那些【不在】MessageBox 中的源频道
             poll_targets = [
-                (chat_id_str, name) for chat_id_str, name in source_ids
+                (chat_id_str, name) for chat_id_str, name in {**dict(source_ids), **dynamic}.items()
                 if int(chat_id_str) not in mb_map
             ]
             
@@ -281,7 +298,7 @@ async def start_message_poller(user_client, bot_client, source_ids):
 
 async def start_clients():
     # 初始化 DBOperations
-    global db_ops, scheduler, chat_updater
+    global db_ops, chat_updater
     db_ops = await DBOperations.create()
 
     try:
@@ -309,7 +326,12 @@ async def start_clients():
                 source_chats = db_session.query(Chat.telegram_chat_id, Chat.name).join(
                     ForwardRule, Chat.id == ForwardRule.source_chat_id
                 ).filter(ForwardRule.enable_rule == True).distinct().all()
-                source_ids = [(c.telegram_chat_id, c.name) for c in source_chats]
+                from collection import sync_sources
+                sync_sources(db_session)
+                db_session.commit()
+                from models.models import BusinessSource
+                source_ids = list({**{c.telegram_chat_id: c.name for c in source_chats},
+                                   **{s.source_id: s.name for s in db_session.query(BusinessSource).filter_by(active=True)}}.items())
             finally:
                 db_session.close()
 
@@ -388,10 +410,9 @@ async def start_clients():
         await register_bot_commands(bot_client)
 
         # 创建并启动调度器
-        scheduler = SummaryScheduler(user_client, bot_client)
-        await scheduler.start()
         from alpha.scheduler import scheduler_loop
         alpha_task = asyncio.create_task(scheduler_loop(user_client))
+        ai_task = asyncio.create_task(scheduler_loop(user_client, "ai"))
         from alpha.mirror import mirror_loop
         mirror_task = asyncio.create_task(mirror_loop(bot_client, user_client))
         
@@ -444,6 +465,9 @@ async def start_clients():
         if 'mirror_task' in locals():
             mirror_task.cancel()
             await asyncio.gather(mirror_task, return_exceptions=True)
+        if 'ai_task' in locals():
+            ai_task.cancel()
+            await asyncio.gather(ai_task, return_exceptions=True)
         if 'alpha_task' in locals():
             alpha_task.cancel()
             await asyncio.gather(alpha_task, return_exceptions=True)
@@ -457,8 +481,6 @@ async def start_clients():
         if db_ops and hasattr(db_ops, 'close'):
             await db_ops.close()
         # 停止调度器
-        if scheduler:
-            scheduler.stop()
         # 停止聊天信息更新器
         if chat_updater:
             chat_updater.stop()

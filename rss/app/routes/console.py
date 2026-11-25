@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSoc
 from fastapi.responses import JSONResponse
 from models.models import (
     get_session, ForwardRule, Chat, Keyword, ReplaceRule,
-    PushConfig, SummaryHistory, User, MediaTypes, MediaExtensions,
+    PushConfig, User, MediaTypes, MediaExtensions,
     RSSConfig, RSSPattern
 )
 from sqlalchemy import or_
@@ -92,23 +92,6 @@ def get_me(user=Depends(get_current_user)):
     return {"username": user.username}
 
 
-@router.post("/trigger-summary-now")
-async def trigger_summary_now(user=Depends(get_current_user)):
-    """手动触发一次聚合总结（含写作推送），通过 bridge 在主进程执行"""
-    require_auth(user)
-    try:
-        import httpx
-        bridge_port = os.getenv('INTERNAL_BRIDGE_PORT', '8001')
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"http://127.0.0.1:{bridge_port}/trigger-summary",
-                timeout=10.0
-            )
-            result = resp.json()
-        return {"status": result.get("status", "success"), "message": result.get("message", "已触发手动总结，预计 1-2 分钟后推送到目标群组")}
-    except Exception as e:
-        logger.error(f"手动触发总结失败: {e}")
-        return {"status": "error", "message": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -367,6 +350,11 @@ def get_rules(user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
+        from collection import sync_sources, business_sources
+        from alpha.storage import source_id
+        sync_sources(db)
+        collected = business_sources(db, 'alpha')
+        db.commit()
         rules = db.query(ForwardRule).all()
         result = []
         for r in rules:
@@ -378,10 +366,8 @@ def get_rules(user=Depends(get_current_user)):
                 "target_chat_name": r.target_chat.name if r.target_chat else "Unknown",
                 "enable_rule": r.enable_rule,
                 "enable_forward": getattr(r, 'enable_forward', True),
-                "enable_collect": r.enable_collect,
+                "enable_collect": source_id(r.source_chat.telegram_chat_id) in collected,
                 "is_ai": r.is_ai,
-                "is_summary": r.is_summary,
-                "summary_time": r.summary_time
             })
         return result
     finally:
@@ -417,6 +403,11 @@ def get_rule_detail(id: int, user=Depends(get_current_user)):
     require_auth(user)
     db = get_session()
     try:
+        from collection import sync_sources, business_sources
+        from alpha.storage import source_id
+        sync_sources(db)
+        collected = business_sources(db, 'alpha')
+        db.commit()
         r = db.query(ForwardRule).filter(ForwardRule.id == id).first()
         if not r:
             raise HTTPException(status_code=404, detail="Rule not found")
@@ -440,7 +431,7 @@ def get_rule_detail(id: int, user=Depends(get_current_user)):
             "add_mode": r.add_mode.name if r.add_mode else "BLACKLIST",
             "enable_rule": r.enable_rule,
             "enable_forward": getattr(r, 'enable_forward', True),
-            "enable_collect": r.enable_collect,
+            "enable_collect": source_id(r.source_chat.telegram_chat_id) in collected,
             "handle_mode": r.handle_mode.name if r.handle_mode else "FORWARD",
             "enable_comment_button": r.enable_comment_button,
             # AI
@@ -448,13 +439,7 @@ def get_rule_detail(id: int, user=Depends(get_current_user)):
             "ai_model": r.ai_model,
             "ai_prompt": r.ai_prompt,
             "enable_ai_upload_image": r.enable_ai_upload_image,
-            "is_summary": r.is_summary,
-            "summary_time": r.summary_time,
-            "summary_prompt": r.summary_prompt,
-            "summary_prompt_b": r.summary_prompt_b,
-            "summary_prompt_d": r.summary_prompt_d,
             "is_keyword_after_ai": r.is_keyword_after_ai,
-            "is_top_summary": r.is_top_summary,
             # 其他
             "enable_push": r.enable_push,
             "enable_only_push": r.enable_only_push,
@@ -481,9 +466,8 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
             "userinfo_template", "time_template", "original_link_template",
             "is_original_time", "add_mode", "enable_rule", "handle_mode",
             "enable_comment_button", "is_ai", "ai_model", "ai_prompt",
-            "enable_ai_upload_image", "is_summary", "summary_time", "summary_prompt",
-            "summary_prompt_b", "summary_prompt_d",
-            "is_keyword_after_ai", "is_top_summary", "enable_push", "enable_only_push",
+            "enable_ai_upload_image",
+            "is_keyword_after_ai", "enable_push", "enable_only_push",
             "only_rss", "enable_sync", "enable_forward", "enable_collect"
         ]:
             if field in data:
@@ -507,6 +491,19 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
 
         from alpha.storage import sync_sources
         sync_sources(db)
+        if 'enable_collect' in data:
+            from models.models import BusinessSource
+            from collection import sync_sources
+            from alpha.storage import source_id
+            sync_sources(db)
+            sid = source_id(r.source_chat.telegram_chat_id)
+            sub = db.get(BusinessSource, ('alpha', sid))
+            if sub is None:
+                sub = BusinessSource(business='alpha', source_id=sid, name=r.source_chat.name)
+                db.add(sub)
+            sub.active = r.enable_collect
+            db.flush()
+            sync_sources(db)
         db.commit()
         return {"status": "success"}
     except HTTPException:
@@ -519,10 +516,8 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
 
 
 def delete_source_rule(db, rule):
-    # 留存历史总结；关键词没有配置 ORM 级联，需要显式删除。
-    db.query(SummaryHistory).filter(SummaryHistory.rule_id == rule.id).update(
-        {SummaryHistory.rule_id: None}, synchronize_session=False
-    )
+    # 关键词没有配置 ORM 级联，需要显式删除。
+
     db.query(Keyword).filter(Keyword.rule_id == rule.id).delete(synchronize_session=False)
     from models.models import RuleSync
     db.query(RuleSync).filter(RuleSync.sync_rule_id == rule.id).delete(synchronize_session=False)
@@ -783,42 +778,8 @@ async def run_sandbox_test(data: Dict, user=Depends(get_current_user)):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 8. 定时总结历史归档 (BUG-06: 修复 or_() )
+# 旧聚合历史入口已移除，见P19。
 # ══════════════════════════════════════════════════════════════════════
-@router.get("/summaries")
-async def get_summaries(page: int = 1, limit: int = 10, search: Optional[str] = None,
-                        user=Depends(get_current_user)):
-    require_auth(user)
-    db = get_session()
-    try:
-        query = db.query(SummaryHistory)
-        if search:
-            # BUG-06: 使用 or_() 而非 Python | 运算符
-            query = query.filter(or_(
-                SummaryHistory.summary_text.like(f"%{search}%"),
-                SummaryHistory.source_channel_name.like(f"%{search}%")
-            ))
-
-        total = query.count()
-        offset = (page - 1) * limit
-        summaries = query.order_by(SummaryHistory.created_at.desc()).offset(offset).limit(limit).all()
-
-        result = []
-        for s in summaries:
-            result.append({
-                "id": s.id,
-                "rule_id": s.rule_id,
-                "source_channel_name": s.source_channel_name,
-                "summary_text": s.summary_text,
-                "message_count": s.message_count,
-                "time_range_start": s.time_range_start.strftime("%Y-%m-%d %H:%M:%S") if s.time_range_start else None,
-                "time_range_end": s.time_range_end.strftime("%Y-%m-%d %H:%M:%S") if s.time_range_end else None,
-                "ai_model": s.ai_model,
-                "created_at": s.created_at.strftime("%Y-%m-%d %H:%M:%S") if s.created_at else None
-            })
-        return {"total": total, "data": result}
-    finally:
-        db.close()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1144,29 +1105,6 @@ def sync_rule_to_all(id: int, data: Dict = None, user=Depends(get_current_user))
         db.close()
 
 
-@router.post("/sandbox/apply-prompt")
-def apply_sandbox_prompt(data: Dict, user=Depends(get_current_user)):
-    """沙盒中一键将优化后的 Prompt 应用到所有规则"""
-    require_auth(user)
-    prompt = data.get("prompt")
-    prompt_type = data.get("type", "summary_prompt")
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt 不能为空")
-    valid_types = ("summary_prompt", "summary_prompt_b", "summary_prompt_d")
-    if prompt_type not in valid_types:
-        raise HTTPException(status_code=400, detail=f"非法的 Prompt 类型，允许值: {valid_types}")
-
-    db = get_session()
-    try:
-        count = db.query(ForwardRule).update({getattr(ForwardRule, prompt_type): prompt})
-        db.commit()
-        return {"status": "success", "message": f"已将 Prompt 应用到 {count} 条规则的 {prompt_type} 字段"}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"应用沙盒 Prompt 失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
 
 
 @router.post("/sandbox/upload-json")
@@ -1202,34 +1140,34 @@ def get_history_samples(user=Depends(get_current_user)):
     """从数据库获取频道消息统计，替代旧版 JSON 文件读取"""
     require_auth(user)
     from sqlalchemy import func
-    from models.models import ForwardedMessage
+    from models.models import CollectedMessage
     db = get_session()
     try:
         # 按 source_chat_id 分组统计
         stats = db.query(
-            ForwardedMessage.source_chat_id,
-            ForwardedMessage.source_chat_name,
-            func.count(ForwardedMessage.id).label('msg_count')
+            CollectedMessage.source_id,
+            CollectedMessage.source_name,
+            func.count(CollectedMessage.id).label('msg_count')
         ).filter(
-            ForwardedMessage.message_text.isnot(None)
+            CollectedMessage.body.isnot(None)
         ).group_by(
-            ForwardedMessage.source_chat_id,
-            ForwardedMessage.source_chat_name
+            CollectedMessage.source_id,
+            CollectedMessage.source_name
         ).all()
 
         if not stats:
-            return {"status": "error", "message": "数据库中暂无消息数据。请先运行 backfill_messages.py 回填历史数据。"}
+            return {"status": "error", "message": "数据库中暂无消息数据。请先启用来源采集。"}
 
         result = []
         for source_id, source_name, count in stats:
             # 取最近 10 条作为样本
-            samples_q = db.query(ForwardedMessage).filter(
-                ForwardedMessage.source_chat_id == source_id,
-                ForwardedMessage.message_text.isnot(None)
-            ).order_by(ForwardedMessage.message_date.desc()).limit(10).all()
+            samples_q = db.query(CollectedMessage).filter(
+                CollectedMessage.source_id == source_id,
+                CollectedMessage.body.isnot(None)
+            ).order_by(CollectedMessage.published_at.desc()).limit(10).all()
 
             samples = [
-                {"id": m.telegram_message_id, "date": m.message_date.isoformat() if m.message_date else "", "summary": (m.message_text or "")[:40]}
+                {"id": m.message_id, "date": m.published_at.isoformat() if m.published_at else "", "summary": (m.body or "")[:40]}
                 for m in samples_q
             ]
             result.append({
@@ -1254,7 +1192,7 @@ def aggregate_messages(data: Dict, user=Depends(get_current_user)):
     """从数据库聚合消息，替代旧版 JSON 文件读取"""
     require_auth(user)
     from datetime import datetime, timezone, timedelta
-    from models.models import ForwardedMessage
+    from models.models import CollectedMessage
 
     channels = data.get("channels", [])
     days = int(data.get("days", 1))
@@ -1264,13 +1202,13 @@ def aggregate_messages(data: Dict, user=Depends(get_current_user)):
         time_limit = datetime.now(timezone.utc) - timedelta(days=days)
 
         # 查询指定频道、指定时间范围内的消息
-        messages = db.query(ForwardedMessage).filter(
-            ForwardedMessage.source_chat_id.in_(channels),
-            ForwardedMessage.message_date >= time_limit,
-            ForwardedMessage.message_text.isnot(None)
+        messages = db.query(CollectedMessage).filter(
+            CollectedMessage.source_id.in_(channels),
+            CollectedMessage.published_at >= time_limit,
+            CollectedMessage.body.isnot(None)
         ).order_by(
-            ForwardedMessage.source_chat_id,
-            ForwardedMessage.message_date.desc()
+            CollectedMessage.source_id,
+            CollectedMessage.published_at.desc()
         ).all()
 
         if not messages:
@@ -1280,14 +1218,14 @@ def aggregate_messages(data: Dict, user=Depends(get_current_user)):
         from collections import defaultdict
         grouped = defaultdict(list)
         for m in messages:
-            grouped[m.source_chat_id].append(m)
+            grouped[m.source_id].append(m)
 
         aggregated_texts = []
         for ch_id, msgs in grouped.items():
             for m in msgs:
-                msg_time = m.message_date.strftime('%H:%M') if m.message_date else ''
-                source_name = m.source_chat_name or '未知频道'
-                aggregated_texts.append(f"【{source_name}】 {msg_time} - {m.message_text}")
+                msg_time = m.published_at.strftime('%H:%M') if m.published_at else ''
+                source_name = m.source_name or '未知频道'
+                aggregated_texts.append(f"【{source_name}】 {msg_time} - {m.body}")
 
         combined_text = "\n".join(aggregated_texts)
         return {"status": "success", "text": combined_text}

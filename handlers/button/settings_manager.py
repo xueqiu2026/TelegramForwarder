@@ -244,43 +244,6 @@ AI_SETTINGS = {
         'toggle_action': 'toggle_keyword_after_ai',
         'toggle_func': lambda current: not current
     },
-    'is_summary': {
-        'display_name': 'AI总结',
-        'values': {
-            True: '开启',
-            False: '关闭'
-        },
-        'toggle_action': 'toggle_summary',
-        'toggle_func': lambda current: not current
-    },
-    'summary_time': {
-        'display_name': '总结时间',
-        'values': {
-            None: '00:00',
-            '': '00:00'
-        },
-        'toggle_action': 'set_summary_time',
-        'toggle_func': None
-    },
-    'summary_prompt': {
-        'display_name': '设置AI总结提示词',
-        'toggle_action': 'set_summary_prompt',
-        'toggle_func': None
-    },
-    'is_top_summary': {
-        'display_name': '顶置总结消息',
-        'values': {
-            True: '是',
-            False: '否'
-        },
-        'toggle_action': 'toggle_top_summary',
-        'toggle_func': lambda current: not current
-    },
-    'summary_now': {
-        'display_name': '立即执行总结',
-        'toggle_action': 'summary_now',
-        'toggle_func': None
-    }
 
 }
 

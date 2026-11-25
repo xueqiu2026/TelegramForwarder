@@ -34,6 +34,8 @@ app.include_router(auth_router)
 app.include_router(feed.router)
 app.include_router(console_router)
 app.include_router(alpha_router)
+from rss.app.routes.ai_digest import router as ai_digest_router
+app.include_router(ai_digest_router)
 
 
 # 根路由重定向到新前端

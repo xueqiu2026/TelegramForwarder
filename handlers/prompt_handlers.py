@@ -25,13 +25,7 @@ async def handle_prompt_setting(event, client, sender_id, chat_id, current_state
     prompt_type = None
     template_type = None
 
-    if current_state.startswith("set_summary_prompt:"):
-        rule_id = current_state.split(":")[1]
-        field_name = "summary_prompt"
-        prompt_type = "AI总结"
-        template_type = "ai"
-        logger.info(f"检测到设置总结提示词,规则ID:{rule_id}")
-    elif current_state.startswith("set_ai_prompt:"):
+    if current_state.startswith("set_ai_prompt:"):
         rule_id = current_state.split(":")[1]
         field_name = "ai_prompt"
         prompt_type = "AI"

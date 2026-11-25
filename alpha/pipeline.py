@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from filelock import FileLock, Timeout
-from models.models import (get_session, CollectedMessage, AlphaEvent, AlphaProjectAlias)
+from models.models import (get_session, CollectedMessage, AlphaEvent, AlphaProjectAlias, AlphaProcessing)
 from alpha.storage import (WINDOW, digest, job, sync_sources, detach_evidence,
                            valid_sources, event_tier, recover_history)
 from alpha.prompts import ANALYZE, DRAFT, ANALYSIS_VERSION, DRAFT_VERSION
@@ -23,19 +23,23 @@ class AlreadyRunning(Exception):
 
 class RunLock:
     """CLI and the main-process scheduler share one lock for this database."""
+    def __init__(self, business="alpha"):
+        self.business = business
+        self.lock_id = 72119036 if business == "alpha" else 72119037
+
     def __enter__(self):
         url = os.environ['DATABASE_URL']
         self.engine, self.conn, self.lock = None, None, None
         if url.startswith('postgres'):
             self.engine = create_engine(url)
             self.conn = self.engine.connect()
-            if not self.conn.execute(text('SELECT pg_try_advisory_lock(72119036)')).scalar():
+            if not self.conn.execute(text(f'SELECT pg_try_advisory_lock({self.lock_id})')).scalar():
                 self.conn.close()
                 self.engine.dispose()
                 raise AlreadyRunning('机会任务正在运行')
         else:
             import tempfile
-            self.lock = FileLock(str(Path(tempfile.gettempdir()) / ('tgbot-alpha-' + digest(url)[:16] + '.lock')))
+            self.lock = FileLock(str(Path(tempfile.gettempdir()) / ('tgbot-' + self.business + '-' + digest(url)[:16] + '.lock')))
             try:
                 self.lock.acquire(timeout=0)
             except Timeout:
@@ -45,7 +49,7 @@ class RunLock:
     def __exit__(self, *args):
         if self.conn:
             try:
-                self.conn.execute(text('SELECT pg_advisory_unlock(72119036)'))
+                self.conn.execute(text(f'SELECT pg_advisory_unlock({self.lock_id})'))
             finally:
                 self.conn.close()
                 self.engine.dispose()
@@ -110,7 +114,7 @@ def reuse_key(row):
 
 
 def reusable(row, previous, version):
-    return (previous.analysis_status in {'done', 'reject'} and previous.analysis_version == version
+    return (previous.alpha.analysis_status in {'done', 'reject'} and previous.alpha.analysis_version == version
             and reuse_key(row) is not None and reuse_key(row) == reuse_key(previous))
 
 
@@ -180,60 +184,60 @@ def apply_decisions(db, decisions, rows, version, usage):
             event.updated_at = datetime.utcnow()
             event.draft_status, event.draft_zh = 'pending', None
             saved.append({**item, 'event_id': event.id})
-        current.analysis = {**decision, 'events': saved}
-        current.analysis_status = ('uncertain' if decision['verdict'] == 'uncertain' else
+        current.alpha.analysis = {**decision, 'events': saved}
+        current.alpha.analysis_status = ('uncertain' if decision['verdict'] == 'uncertain' else
                                    'reject' if decision['verdict'] == 'reject' else 'done')
-        current.analysis_version, current.error = version, None
+        current.alpha.analysis_version, current.alpha.error = version, None
         # One usage record per request, not multiplied by the number of decisions.
         if decision is decisions[0]:
-            current.usage = {'calls': [*(current.usage or {}).get('calls', []), usage]}
+            current.alpha.usage = {'calls': [*(current.alpha.usage or {}).get('calls', []), usage]}
         else:
-            current.usage = {**(current.usage or {}), 'shared_request': decisions[0]['id']}
+            current.alpha.usage = {**(current.alpha.usage or {}), 'shared_request': decisions[0]['id']}
 
 
 def refresh_cached(db, row, previous, version):
-    data = json.loads(json.dumps(previous.analysis))
+    data = json.loads(json.dumps(previous.alpha.analysis))
     data['id'] = row.id
     if any(db.get(AlphaEvent, e['event_id']) is None for e in data['events']):
         return False
     for item in data['events']:
         event = db.get(AlphaEvent, item['event_id'])
         event.sources = [*(event.sources or []), evidence(row, {**item, 'change': 'duplicate'})]
-    row.analysis, row.analysis_status, row.analysis_version = data, previous.analysis_status, version
-    row.error, row.usage = None, {'reused_from': previous.id}
+    row.alpha.analysis, row.alpha.analysis_status, row.alpha.analysis_version = data, previous.alpha.analysis_status, version
+    row.alpha.error, row.alpha.usage = None, {'reused_from': previous.id}
     return True
 
 
 async def analyze_pending(db, model, now, ask):
-    active = sync_sources(db)
+    sync_sources(db)
+    from collection import business_sources
+    active = business_sources(db, "alpha")
     db.commit()
     version = ANALYSIS_VERSION + ':' + model
-    pending = db.query(CollectedMessage).filter(CollectedMessage.source_id.in_(active),
-        CollectedMessage.analysis_status.in_(['pending', 'failed'])).order_by(CollectedMessage.published_at).all()
+    pending = db.query(CollectedMessage).join(AlphaProcessing).filter(CollectedMessage.source_id.in_(active),
+        AlphaProcessing.analysis_status.in_(['pending', 'failed'])).order_by(CollectedMessage.published_at).all()
     # Old backlog remains visible as history, never falsely promoted to current opportunities.
     pending = [r for r in pending if r.published_at <= now]
     for row in pending:
         if row.published_at < now - WINDOW:
-            row.analysis_status, row.error = 'history', '超过36小时，不作为当前机会分析'
+            row.alpha.analysis_status, row.alpha.error = 'history', '超过36小时，不作为当前机会分析'
             continue
         if not row.body.strip():
-            row.analysis_status, row.error = 'uncertain', '无可用文字，媒体待补'
+            row.alpha.analysis_status, row.alpha.error = 'uncertain', '无可用文字，媒体待补'
             continue
-        cached = db.query(CollectedMessage).filter_by(content_hash=row.content_hash,
-                                                     analysis_version=version).filter(
-                                                         CollectedMessage.analysis_status.in_(['done', 'reject'])).first()
+        cached = db.query(CollectedMessage).join(AlphaProcessing).filter(CollectedMessage.content_hash == row.content_hash, AlphaProcessing.analysis_version == version,
+                                                         AlphaProcessing.analysis_status.in_(['done', 'reject'])).first()
         if cached and reusable(row, cached, version):
             refresh_cached(db, row, cached, version)
     db.commit()
-    pending = [r for r in pending if r.analysis_status in {'pending', 'failed'}]
+    pending = [r for r in pending if r.alpha.analysis_status in {'pending', 'failed'}]
     batch_size = max(1, int(os.getenv('ALPHA_BATCH_SIZE', '12')))
     for start in range(0, len(pending), batch_size):
         rows = pending[start:start + batch_size]
         representatives, copies, by_content = [], [], {}
         for row in rows:
             # Prior batches in this same run are now reusable as well.
-            cached = db.query(CollectedMessage).filter_by(content_hash=row.content_hash,
-                analysis_version=version).filter(CollectedMessage.analysis_status.in_(['done', 'reject'])).first()
+            cached = db.query(CollectedMessage).join(AlphaProcessing).filter(CollectedMessage.content_hash == row.content_hash, AlphaProcessing.analysis_version == version,AlphaProcessing.analysis_status.in_(['done', 'reject'])).first()
             if cached and reusable(row, cached, version) and refresh_cached(db, row, cached, version):
                 continue
             key = reuse_key(row)
@@ -274,10 +278,10 @@ async def analyze_pending(db, model, now, ask):
             for rid, (_, revision) in originals.items():
                 row = db.get(CollectedMessage, rid)
                 if row.revision == revision:
-                    row.analysis_status, row.error = 'failed', str(exc)
+                    row.alpha.analysis_status, row.alpha.error = 'failed', str(exc)
             if usage is not None:
                 anchor = db.get(CollectedMessage, representatives[0].id)
-                anchor.usage = {'calls': [*(anchor.usage or {}).get('calls', []), usage]}
+                anchor.alpha.usage = {'calls': [*(anchor.alpha.usage or {}).get('calls', []), usage]}
             db.commit()
 
 
@@ -374,11 +378,14 @@ async def run_pipeline(client=None, model=None, ask=call_model, now=None, slot=N
             model = model or config.model or get_default_ai_model()
             config.status, config.error, config.last_run = 'running', None, now
             db.commit()
-            failures = await recover_history(client) if client is not None else {'offline': '本次未连接TG补采，处理已存原文'}
-            active = sync_sources(db)
+            failures = await recover_history(client, slot=slot) if client is not None else {'offline': '本次未连接TG补采，处理已存原文'}
+            sync_sources(db)
+            from collection import business_sources
+            active = business_sources(db, "alpha")
+            failures = {sid: error for sid, error in failures.items() if sid in active or sid == "offline"}
             db.commit()
-            has_work = db.query(CollectedMessage.id).filter(CollectedMessage.source_id.in_(active),
-                CollectedMessage.analysis_status.in_(['pending', 'failed']),
+            has_work = db.query(CollectedMessage.id).join(AlphaProcessing).filter(CollectedMessage.source_id.in_(active),
+                AlphaProcessing.analysis_status.in_(['pending', 'failed']),
                 CollectedMessage.published_at >= now - WINDOW).first()
             has_draft = any(event_tier(e, now) in {'main', 'closed'} and e.draft_status != 'ready'
                             for e in db.query(AlphaEvent))
@@ -392,8 +399,8 @@ async def run_pipeline(client=None, model=None, ask=call_model, now=None, slot=N
             config = job(db)
             from alpha.publish import publish_ready
             delivery = await publish_ready(db, client, config, now)
-            pending_errors = db.query(CollectedMessage).filter(CollectedMessage.source_id.in_(active),
-                CollectedMessage.published_at >= now - WINDOW, CollectedMessage.analysis_status == 'failed').count()
+            pending_errors = db.query(CollectedMessage).join(AlphaProcessing).filter(CollectedMessage.source_id.in_(active),
+                CollectedMessage.published_at >= now - WINDOW, AlphaProcessing.analysis_status == 'failed').count()
             draft_errors = sum(e.draft_status in {'failed', 'blocked'} and event_tier(e, now) in {'main', 'closed'}
                                for e in db.query(AlphaEvent))
             config.status = 'partial' if failures or pending_errors or draft_errors or delivery['errors'] or delivery['unknown'] else 'success'

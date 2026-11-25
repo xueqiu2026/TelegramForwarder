@@ -116,7 +116,7 @@ const TABS = [
   { id: 'message', label: '消息处理' },
   { id: 'ai', label: 'AI 配置' },
   { id: 'filter', label: '过滤规则' },
-  { id: 'push', label: '推送 & 总结' },
+  { id: 'push', label: '推送' },
 ] as const
 
 export default function RulesPage() {
@@ -186,22 +186,6 @@ export default function RulesPage() {
     }
   }
 
-  // 时间徽标管理器变量与逻辑
-  const [newTimeInput, setNewTimeInput] = useState('00:00')
-  const timeList = detail?.summary_time ? detail.summary_time.split(',').map(t => t.trim()).filter(Boolean) : []
-
-  const handleRemoveTime = (timeToRemove: string) => {
-    const nextList = timeList.filter(t => t !== timeToRemove)
-    saveField('summary_time', nextList.join(','))
-  }
-
-  const handleAddTime = () => {
-    if (!newTimeInput) return
-    if (timeList.includes(newTimeInput)) return
-    const nextList = [...timeList, newTimeInput].sort()
-    saveField('summary_time', nextList.join(','))
-  }
-
   // 加载详情
   useEffect(() => {
     if (!selectedId) { setDetail(null); return }
@@ -233,7 +217,6 @@ export default function RulesPage() {
       if (presetType === 'direct') {
         preset = {
           is_ai: false,
-          is_summary: false,
           is_replace: false,
           enable_push: false,
         }
@@ -242,14 +225,12 @@ export default function RulesPage() {
           is_ai: true,
           ai_model: defaultModelData?.default_model || Object.values(modelsDict || {}).flat()[0] || '',
           ai_prompt: '请尊重原意，保持原有格式不变，用简体中文重写下面的内容：',
-          is_summary: false,
         }
       } else if (presetType === 'rss') {
         preset = {
           only_rss: true,
           enable_rule: true,
           is_ai: false,
-          is_summary: false,
         }
       }
       await rulesApi.update(selectedId, preset)
@@ -268,9 +249,8 @@ export default function RulesPage() {
     push_settings: false,
   })
   const syncFieldGroups: Record<string, { label: string; fields: string[] }> = {
-    prompts: { label: '📡 所有总结 Prompt（简报 + 推文工厂 + 信息差快报）', fields: ['summary_prompt', 'summary_prompt_b', 'summary_prompt_d'] },
     ai_settings: { label: '🤖 AI 设置（模型、提示词、开关）', fields: ['is_ai', 'ai_model', 'ai_prompt', 'enable_ai_upload_image', 'is_keyword_after_ai'] },
-    forward_settings: { label: '⚙️ 转发与总结设置（模式、时间、置顶等）', fields: ['forward_mode', 'handle_mode', 'message_mode', 'is_preview', 'is_replace', 'is_summary', 'summary_time', 'is_top_summary', 'use_bot', 'enable_forward', 'enable_comment_button'] },
+    forward_settings: { label: '⚙️ 转发设置（模式等）', fields: ['forward_mode', 'handle_mode', 'message_mode', 'is_preview', 'is_replace', 'use_bot', 'enable_forward', 'enable_comment_button'] },
     push_settings: { label: '📢 推送设置', fields: ['enable_push', 'enable_only_push'] },
   }
   const handleSyncToAll = () => {
@@ -456,7 +436,7 @@ export default function RulesPage() {
                   style={{ ...inputStyle, width: 'auto', padding: '4px 8px', fontSize: 12, height: 28 }}
                 >
                   <option value="">(选择快捷配置模板)</option>
-                  <option value="direct">纯消息直转 (关闭 AI & 过滤 & 总结)</option>
+                  <option value="direct">纯消息直转 (关闭 AI & 过滤)</option>
                   <option value="ai">AI 翻译与摘要转发 (开启 AI 提示词)</option>
                   <option value="rss">仅生成 RSS 订阅源 (不转发至目标)</option>
                 </select>
@@ -504,13 +484,10 @@ export default function RulesPage() {
                   />
                   <FormSwitch
                     label="采集机会原文"
-                    description="只保存一次原文，供定时机会任务使用；不自动开启直转或旧总结。迁移后不再向旧总结表写入新消息。"
+                    description="管理此来源的Alpha采集订阅；AI来源在AI内容页面独立管理，共享同一原文库。"
                     checked={detail.enable_collect}
                     onCheckedChange={val => saveField('enable_collect', val)}
                   />
-                  {detail.enable_collect && detail.is_summary && (
-                    <p style={{ color: 'var(--color-warning)' }}>旧总结仍开启：已有待总结消息仍可能被旧任务发送，请在正式切换时单独停用。</p>
-                  )}
                   <FormSwitch
                     label="使用 Bot 转发"
                     description="启用官方 Telegram Bot 进行推送；关闭则使用 Userbot 直接发送"
@@ -805,146 +782,10 @@ export default function RulesPage() {
               </div>
             )}
 
-            {/* Tab 5: 推送 & 总结 */}
+            {/* Tab 5: 推送 */}
             {activeTab === 'push' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 
-                {/* 定时总结 */}
-                <div className="card-glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  <h3 style={sectionTitle}>AI 定时消息总结</h3>
-                  <FormSwitch
-                    label="启用 AI 定时消息总结"
-                    description="定时将来源聊天室的消息汇聚，并生成 AI 智能摘要在目标频道发布"
-                    checked={detail.is_summary}
-                    onCheckedChange={val => saveField('is_summary', val)}
-                  />
-
-                  {detail.is_summary && (
-                    <div style={{
-                      display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 12,
-                      borderTop: '1px solid var(--border-light)'
-                    }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 3fr', gap: 16 }}>
-                        <div>
-                          <label style={labelStyle}>每日总结发送时间</label>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '6px 0' }}>
-                            {timeList.map(t => (
-                              <span
-                                key={t}
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: 4,
-                                  padding: '3px 8px',
-                                  background: 'var(--bg-surface-active)',
-                                  border: '1px solid var(--border-light)',
-                                  borderRadius: 12,
-                                  fontSize: 12,
-                                  color: 'var(--text-primary)',
-                                }}
-                              >
-                                {t}
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveTime(t)}
-                                  style={{
-                                    background: 'none',
-                                    border: 'none',
-                                    cursor: 'pointer',
-                                    color: 'var(--text-muted)',
-                                    padding: 0,
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                  }}
-                                  title="移除此时刻"
-                                >
-                                  <X size={10} />
-                                </button>
-                              </span>
-                            ))}
-                            {timeList.length === 0 && (
-                              <span style={{ fontSize: 12, color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                                (未配置时间，请在下方添加)
-                              </span>
-                            )}
-                          </div>
-                          
-                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
-                            <input
-                              type="time"
-                              value={newTimeInput}
-                              onChange={e => setNewTimeInput(e.target.value)}
-                              style={{ ...inputStyle, width: 'auto', padding: '4px 8px', height: 30 }}
-                            />
-                            <button
-                              type="button"
-                              onClick={handleAddTime}
-                              style={{
-                                ...btnStyle,
-                                padding: '4px 10px',
-                                height: 30,
-                                fontSize: 12,
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 2,
-                              }}
-                            >
-                              <Plus size={12} /> 添加时间
-                            </button>
-                          </div>
-                          <span style={{ ...descStyle, marginTop: 4 }}>支持添加多个触发时刻</span>
-                        </div>
-                        <div>
-                          <FormSwitch
-                            label="置顶总结消息"
-                            description="总结成功发布至目标群组/频道后，自动将其执行 Telegram 置顶操作"
-                            checked={detail.is_top_summary}
-                            onCheckedChange={val => saveField('is_top_summary', val)}
-                          />
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                        <div>
-                          <label style={labelStyle}>📡 跨市场情报简报 Prompt</label>
-                          <textarea
-                            value={detail.summary_prompt ?? ''}
-                            onBlur={e => saveField('summary_prompt', e.target.value)}
-                            onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt: e.target.value } : prev)}
-                            rows={6}
-                            style={{ ...inputStyle, resize: 'vertical' }}
-                            placeholder="配置每日简报总结的格式指南..."
-                          />
-                        </div>
-                        <div>
-                          <label style={labelStyle}>☀️ 早安老铁 / 推文工厂 Prompt</label>
-                          <textarea
-                            value={detail.summary_prompt_b ?? ''}
-                            onBlur={e => saveField('summary_prompt_b', e.target.value)}
-                            onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt_b: e.target.value } : prev)}
-                            rows={6}
-                            style={{ ...inputStyle, resize: 'vertical' }}
-                            placeholder="留空则使用系统默认的推文工厂 Prompt..."
-                          />
-                          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>留空时将自动使用 constants.py 中的默认 WRITING_PROMPT_B</span>
-                        </div>
-                        <div>
-                          <label style={labelStyle}>🏹 信息差快报 Prompt</label>
-                          <textarea
-                            value={detail.summary_prompt_d ?? ''}
-                            onBlur={e => saveField('summary_prompt_d', e.target.value)}
-                            onChange={e => setDetail(prev => prev ? { ...prev, summary_prompt_d: e.target.value } : prev)}
-                            rows={6}
-                            style={{ ...inputStyle, resize: 'vertical' }}
-                            placeholder="留空则使用系统默认的信息差快报 Prompt..."
-                          />
-                          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>留空时将自动使用 constants.py 中的默认 WRITING_PROMPT_D</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
                 {/* 推送控制与通道管理 */}
                 <div className="card-glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <h3 style={sectionTitle}>Apprise 第三方外部推送</h3>

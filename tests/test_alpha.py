@@ -10,15 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
-from models.models import (Base, get_session, init_db, Chat, ForwardRule, ForwardedMessage,
+from models.models import (Base, get_session, init_db, Chat, ForwardRule,
                            CollectedMessage, AlphaEvent, AlphaCollectionState, AlphaJob)
-from alpha.storage import (save_message, sync_sources, is_migrated, event_tier, valid_sources,
+from alpha.storage import (save_message, sync_sources, event_tier, valid_sources,
                            recover_history, snapshot, export_markdown, job)
 from alpha.pipeline import run_pipeline, RunLock, AlreadyRunning
 from alpha.scheduler import latest_slot, TZ
 from alpha.prompts import ANALYZE
 from alpha.editorial import TYPE_PROMPT
-from utils.message_logger import log_forwarded_message
 
 
 NOW = datetime(2026, 11, 8, 5)
@@ -43,9 +42,9 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
                          Chat(id=2, telegram_chat_id='2234567890', name='Source B'),
                          Chat(id=3, telegram_chat_id='3234567890', name='Target')])
         self.db.add_all([ForwardRule(id=1, source_chat_id=1, target_chat_id=3, enable_collect=True,
-                                     enable_forward=False, is_summary=False),
+                                     enable_forward=False),
                          ForwardRule(id=2, source_chat_id=2, target_chat_id=3, enable_collect=True,
-                                     enable_forward=False, is_summary=False)])
+                                     enable_forward=False)])
         self.db.commit()
         sync_sources(self.db, NOW - timedelta(hours=40))
         self.db.commit()
@@ -167,7 +166,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         user_forward.assert_not_awaited()
         self.db.expire_all()
         self.assertEqual(self.db.query(CollectedMessage).count(), 1)
-        self.assertEqual(self.db.query(ForwardedMessage).count(), 0)
 
     async def test_candidate_originals_only_for_related_project_or_alias(self):
         from alpha.pipeline import candidate_context
@@ -226,7 +224,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         await collect_event(Event())
         self.db.expire_all()
         self.assertEqual(self.db.query(CollectedMessage).count(), 1)
-        self.assertEqual(self.db.query(ForwardedMessage).count(), 0)
 
     async def test_project_channel_name_still_blocks_explicit_attribution(self):
         first = self.store()
@@ -255,8 +252,8 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.db.flush()
         second_id = second.id
         for row in self.db.query(CollectedMessage):
-            row.analysis = {**row.analysis, 'events': [*row.analysis['events'],
-                {**row.analysis['events'][0], 'event_id': second.id}]}
+            row.alpha.analysis = {**row.alpha.analysis, 'events': [*row.alpha.analysis['events'],
+                {**row.alpha.analysis['events'][0], 'event_id': second.id}]}
         self.db.commit()
         async def review(model, prompt, data):
             return {'groups': [{'ids': [first.id, second_id], 'project': first.project,
@@ -268,7 +265,7 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.get(AlphaEvent, second_id).draft_status, 'merged')
         self.assertFalse(self.db.get(AlphaEvent, second_id).sources)
         for row in self.db.query(CollectedMessage):
-            self.assertEqual([x['event_id'] for x in row.analysis['events']], [first.id])
+            self.assertEqual([x['event_id'] for x in row.alpha.analysis['events']], [first.id])
 
     async def test_independent_rounds_stay_separate_and_review_is_cached(self):
         from alpha.consolidate import consolidate_events
@@ -327,7 +324,7 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         event = self.db.query(AlphaEvent).one()
         row = self.db.query(CollectedMessage).one()
         row.media = {'type': 'MessageMediaPhoto', 'id': '456'}
-        row.analysis = {**row.analysis, 'events': [*row.analysis['events'], {'project': 'Other project'}]}
+        row.alpha.analysis = {**row.alpha.analysis, 'events': [*row.alpha.analysis['events'], {'project': 'Other project'}]}
         self.db.commit()
         self.assertIsNone(event_photo(self.db, event))
 
@@ -420,13 +417,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(p['text'].encode('utf-16-le')) // 2 <= 3500 for p in parts))
         self.assertTrue(parts[0]['entities'])
 
-    async def test_old_summary_entry_disabled_for_migrated_target(self):
-        from scheduler.summary_scheduler import SummaryScheduler
-        config = job(self.db)
-        config.target_id = '-1003234567890'
-        self.db.commit()
-        scheduler = SummaryScheduler(SimpleNamespace(), SimpleNamespace())
-        await scheduler._execute_aggregated_summary('3234567890', {})
 
     async def test_editorial_process_stays_out_of_public_body(self):
         self.store()
@@ -528,22 +518,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('资料冲突', export_markdown(now=NOW))
         self.assertIn('资料冲突', export_markdown(internal=True, now=NOW))
 
-    async def test_unique_album_entities_and_no_legacy_write(self):
-        link = SimpleNamespace(offset=0, length=4, url='https://example.org/register')
-        self.store(grouped_id=999, entities=[link])
-        self.store(grouped_id=999, entities=[link])
-        self.store(mid=2, grouped_id=999)
-        self.assertEqual(self.db.query(CollectedMessage).count(), 2)
-        self.assertEqual(self.db.query(CollectedMessage).first().entities[0]['url'], link.url)
-        rule = self.db.get(ForwardRule, 1)
-        log_forwarded_message(rule, SimpleNamespace(message=incoming()))
-        self.assertEqual(self.db.query(ForwardedMessage).count(), 0)
-        rule.enable_collect = False
-        sync_sources(self.db, NOW)
-        self.db.commit()
-        self.assertTrue(is_migrated(self.db, rule))
-        log_forwarded_message(rule, SimpleNamespace(message=incoming()))
-        self.assertEqual(self.db.query(ForwardedMessage).count(), 0)
 
     async def test_collect_only_listener_covers_album_and_edit(self):
         from alpha.storage import collect_event
@@ -560,7 +534,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         await collect_event(Event(incoming(10, body='New refund rules', grouped_id=7, edit_date=NOW)))
         self.db.expire_all()
         self.assertEqual(self.db.query(CollectedMessage).filter_by(message_id=10).one().revision, 2)
-        self.assertEqual(self.db.query(ForwardedMessage).count(), 0)
 
     async def test_cross_batch_second_source_and_reexport_without_ai(self):
         self.store()
@@ -589,7 +562,7 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(p == ANALYZE for p, _ in self.calls), 1)
         self.db.expire_all()
         self.assertEqual(event_tier(self.db.query(AlphaEvent).one(), NOW), 'main')
-        self.assertEqual(self.db.query(CollectedMessage).filter_by(source_id='-1002234567890').one().usage,
+        self.assertEqual(self.db.query(CollectedMessage).filter_by(source_id='-1002234567890').one().alpha.usage,
                          {'reused_from': 1})
 
     async def test_same_batch_identical_text_sent_only_once(self):
@@ -649,7 +622,7 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.store(body='Unrelated news', edit_date=NOW)
         self.assertEqual(event_tier(self.db.query(AlphaEvent).one(), NOW), 'single')
         self.assertIsNone(self.db.query(AlphaEvent).one().draft_zh)
-        self.assertEqual(self.db.get(CollectedMessage, 1).analysis_status, 'pending')
+        self.assertEqual(self.db.get(CollectedMessage, 1).alpha.analysis_status, 'pending')
 
     async def test_draft_failure_only_retries_draft(self):
         self.store()
@@ -678,8 +651,8 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         await self.run_job(bad)
         self.db.expire_all()
         row = self.db.query(CollectedMessage).one()
-        self.assertEqual(row.analysis_status, 'failed')
-        self.assertEqual(row.usage['calls'][0]['total_tokens'], 19)
+        self.assertEqual(row.alpha.analysis_status, 'failed')
+        self.assertEqual(row.alpha.usage['calls'][0]['total_tokens'], 19)
         self.assertEqual(self.db.query(AlphaEvent).count(), 0)
 
     async def test_public_source_leak_is_not_accepted(self):
@@ -698,7 +671,8 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_25_messages_failure_and_restart(self):
         state = self.db.get(AlphaCollectionState, '-1001234567890')
         state.enabled_at = NOW - timedelta(hours=2)
-        self.db.get(ForwardRule, 2).enable_collect = False
+        from models.models import BusinessSource
+        self.db.get(BusinessSource, ('alpha', '-1002234567890')).active = False
         self.db.commit()
         class Client:
             fail = True
@@ -720,10 +694,11 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.get(AlphaCollectionState, '-1001234567890').scanned_id, 26)
         await recover_history(client)
         self.assertEqual(self.db.query(CollectedMessage).count(), 25)
-        self.assertEqual(self.db.query(ForwardedMessage).count(), 0)
 
     async def test_rules_deleted_keep_raw_and_excluded_source(self):
         self.store()
+        from models.models import BusinessSource
+        self.db.get(BusinessSource, ('alpha', '-1001234567890')).active = False
         self.db.delete(self.db.get(ForwardRule, 1))
         self.db.commit()
         sync_sources(self.db, NOW)
@@ -756,7 +731,7 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
             return await self.ask(model, prompt, data)
         await self.run_job(edit)
         self.db.expire_all()
-        self.assertEqual(self.db.get(CollectedMessage, row.id).analysis_status, 'pending')
+        self.assertEqual(self.db.get(CollectedMessage, row.id).alpha.analysis_status, 'pending')
         self.assertEqual(self.db.query(AlphaEvent).count(), 0)
 
     async def test_types_only_after_threshold_and_cached_until_facts_change(self):
@@ -1004,7 +979,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         self.db = get_session()
         self.assertFalse(self.db.get(ForwardRule, 1).enable_collect)
         self.assertFalse(self.db.get(ForwardRule, 1).enable_forward)
-        self.assertFalse(self.db.get(ForwardRule, 1).is_summary)
         self.db.add(ForwardRule(source_chat_id=1, target_chat_id=2))
         self.db.commit()
         self.assertFalse(self.db.query(ForwardRule).filter_by(target_chat_id=2).one().enable_collect)
@@ -1028,7 +1002,6 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
             detail = (await client.get('/api/rules/1')).json()
             self.assertFalse(detail['enable_collect'])
             self.assertFalse(detail['enable_forward'])
-            self.assertFalse(detail['is_summary'])
             self.assertEqual((await client.put('/api/alpha/config', json={'enabled': True, 'model': ''})).status_code, 400)
             self.assertEqual((await client.get('/api/alpha/export')).status_code, 200)
             self.assertEqual((await client.get('/api/alpha/export?internal=true')).status_code, 200)

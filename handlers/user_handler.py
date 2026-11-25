@@ -3,7 +3,6 @@ import re
 import logging
 import asyncio
 from utils.common import check_keywords, get_sender_info
-from utils.message_logger import log_forwarded_message
 
 
 logger = logging.getLogger(__name__)
@@ -70,7 +69,6 @@ async def process_forward_rule(client, event, chat_id, rule):
                 )
                 logger.info(f'[用户] 已转发 {len(messages)} 条媒体组消息到: {target_chat.name} ({target_chat_id})')
                 # 消息落库
-                log_forwarded_message(rule, event)
                 
             else:
                 # 处理单条消息
@@ -81,9 +79,8 @@ async def process_forward_rule(client, event, chat_id, rule):
                 )
                 logger.info(f'[用户] 消息已转发到: {target_chat.name} ({target_chat_id})')
                 # 消息落库
-                log_forwarded_message(rule, event)
                 
                 
         except Exception as e:
             logger.error(f'转发消息时出错: {str(e)}')
-            logger.exception(e) 
+            logger.exception(e)

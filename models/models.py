@@ -68,13 +68,7 @@ class ForwardRule(Base):
     ai_model = Column(String, nullable=True)  # 使用的AI模型
     ai_prompt = Column(String, nullable=True)  # AI处理的prompt
     enable_ai_upload_image = Column(Boolean, default=False)  # 是否启用AI图片上传功能
-    is_summary = Column(Boolean, default=False)  # 是否启用AI总结
-    summary_time = Column(String(50), default=os.getenv('DEFAULT_SUMMARY_TIME', '07:00'))
-    summary_prompt = Column(String, nullable=True)  # AI总结的prompt
-    summary_prompt_b = Column(String, nullable=True)  # 早安老铁(推文工厂) Prompt
-    summary_prompt_d = Column(String, nullable=True)  # 信息差快报 Prompt
     is_keyword_after_ai = Column(Boolean, default=False) # AI处理后是否再次执行关键字过滤
-    is_top_summary = Column(Boolean, default=True) # 是否顶置总结消息
     enable_delay = Column(Boolean, default=False)  # 是否启用延迟处理
     delay_seconds = Column(Integer, default=5)  # 延迟处理秒数
     # RSS相关字段
@@ -99,7 +93,6 @@ class ForwardRule(Base):
     rss_config = relationship('RSSConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
     rule_syncs = relationship('RuleSync', back_populates='rule', cascade="all, delete-orphan")
     push_config = relationship('PushConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
-    forwarded_messages = relationship('ForwardedMessage', back_populates='rule', cascade="all, delete-orphan")
 
 class CollectedMessage(Base):
     __tablename__ = 'collected_messages'
@@ -118,12 +111,95 @@ class CollectedMessage(Base):
     source_url = Column(String, default='')
     content_hash = Column(String, nullable=False, index=True)
     revision = Column(Integer, default=1, nullable=False)
+    alpha = relationship('AlphaProcessing', uselist=False, back_populates='message', cascade='all, delete-orphan')
+    __table_args__ = (UniqueConstraint('source_id', 'message_id', name='unique_collected_source_message'),)
+
+
+class BusinessSource(Base):
+    __tablename__ = 'business_sources'
+    business = Column(String, primary_key=True)
+    source_id = Column(String, primary_key=True)
+    name = Column(String, default='')
+    active = Column(Boolean, default=True, nullable=False)
+    enabled_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
+class BusinessMigration(Base):
+    __tablename__ = 'business_migrations'
+    name = Column(String, primary_key=True)
+    applied_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
+class AlphaProcessing(Base):
+    __tablename__ = 'alpha_processing'
+    message_id = Column(Integer, ForeignKey('collected_messages.id'), primary_key=True)
+    revision = Column(Integer, nullable=False, default=1)
     analysis_status = Column(String, default='pending', nullable=False, index=True)
     analysis = Column(JSON)
     error = Column(String)
     analysis_version = Column(String)
     usage = Column(JSON, default=dict)
-    __table_args__ = (UniqueConstraint('source_id', 'message_id', name='unique_collected_source_message'),)
+    message = relationship('CollectedMessage', back_populates='alpha')
+
+
+class AIProcessing(Base):
+    __tablename__ = 'ai_processing'
+    message_id = Column(Integer, ForeignKey('collected_messages.id'), primary_key=True)
+    revision = Column(Integer, nullable=False)
+    status = Column(String, default='pending', nullable=False, index=True)
+    version = Column(String)
+    recall = Column(String)
+    result = Column(JSON)
+    usage = Column(JSON, default=dict)
+    error = Column(String)
+
+
+class AIItem(Base):
+    __tablename__ = 'ai_items'
+    id = Column(Integer, primary_key=True)
+    subject = Column(String, nullable=False)
+    goal = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    conditions = Column(String, default='')
+    status = Column(String, default='needs_info', nullable=False)
+    deadline = Column(DateTime)
+    sources = Column(JSON, default=list)
+    output_zh = Column(String)
+    output_hash = Column(String)
+    output_version = Column(String)
+    output_usage = Column(JSON, default=dict)
+    error = Column(String)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
+class AIJob(Base):
+    __tablename__ = 'ai_job'
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    schedule_hours = Column(JSON, default=lambda: [7, 13, 19, 22], nullable=False)
+    model = Column(String, default='')
+    publish_enabled = Column(Boolean, default=False, nullable=False)
+    target_id = Column(String, default='@wanshenmeAI')
+    last_slot = Column(String)
+    last_run = Column(DateTime)
+    analysis_until = Column(DateTime)
+    status = Column(String, default='idle')
+    result = Column(JSON, default=dict)
+    error = Column(String)
+
+
+class AIPublication(Base):
+    __tablename__ = 'ai_publications'
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey('ai_items.id'), nullable=False, index=True)
+    target_id = Column(String, nullable=False)
+    draft_hash = Column(String, nullable=False)
+    parts = Column(JSON, nullable=False)
+    sources = Column(JSON, default=list, nullable=False)
+    status = Column(String, default='queued', nullable=False)
+    error = Column(String)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint('item_id', 'target_id', name='unique_ai_item_target'),)
 
 
 class AlphaEvent(Base):
@@ -168,6 +244,7 @@ class AlphaJob(Base):
     __tablename__ = 'alpha_job'
     id = Column(Integer, primary_key=True)
     enabled = Column(Boolean, default=False, nullable=False)
+    schedule_hours = Column(JSON, default=lambda: [7, 13, 19, 22], nullable=False)
     model = Column(String, default='')
     publish_enabled = Column(Boolean, default=False, nullable=False)
     target_id = Column(String, default='')
@@ -330,43 +407,6 @@ class User(Base):
     username = Column(String, nullable=False)  
     password = Column(String, nullable=False)  
 
-class SummaryHistory(Base):
-    __tablename__ = 'summary_history'
-
-    id = Column(Integer, primary_key=True)
-    rule_id = Column(Integer, ForeignKey('forward_rules.id'), nullable=True)  # 聚合总结时为 None
-    source_channel_name = Column(String, nullable=True)
-    summary_text = Column(String, nullable=False)
-    message_count = Column(Integer, nullable=True)
-    time_range_start = Column(DateTime, nullable=True)
-    time_range_end = Column(DateTime, nullable=True)
-    ai_model = Column(String, nullable=True)
-    prompt_used = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    target_chat_id = Column(String, nullable=True)     # 目标群组 ID
-    source_count = Column(Integer, nullable=True)       # 涉及的源频道数量
-
-    # 关系
-    rule = relationship('ForwardRule', foreign_keys=[rule_id])
-
-class ForwardedMessage(Base):
-    """转发消息记录表，用于聚合总结"""
-    __tablename__ = 'forwarded_messages'
-
-    id = Column(Integer, primary_key=True)
-    rule_id = Column(Integer, ForeignKey('forward_rules.id', ondelete='CASCADE'), nullable=False)
-    source_chat_id = Column(String, nullable=False)       # 源频道 telegram_chat_id
-    source_chat_name = Column(String, nullable=True)       # 源频道名称（冗余）
-    target_chat_id = Column(String, nullable=False)        # 目标群组 telegram_chat_id
-    telegram_message_id = Column(Integer, nullable=True)   # 源频道中的消息 ID
-    message_text = Column(String, nullable=True)           # 原始消息文本
-    has_media = Column(Boolean, default=False)             # 是否包含媒体
-    message_date = Column(DateTime, nullable=False)        # 源频道原始发送时间 (UTC)
-    forwarded_at = Column(DateTime, default=datetime.datetime.utcnow)
-    is_summarized = Column(Boolean, default=False)         # 是否已被总结
-
-    rule = relationship('ForwardRule', back_populates='forwarded_messages')
-
 def migrate_db(engine):
     """数据库迁移函数，确保新字段的添加"""
     inspector = inspect(engine)
@@ -379,39 +419,6 @@ def migrate_db(engine):
         
     try:
         with engine.connect() as connection:
-
-            # 如果 forwarded_messages 表不存在，创建表
-            if 'forwarded_messages' not in existing_tables:
-                logging.info("创建 forwarded_messages 表...")
-                ForwardedMessage.__table__.create(engine)
-
-            # summary_history 表新增列
-            if 'summary_history' in existing_tables:
-                sh_columns = {col['name'] for col in inspector.get_columns('summary_history')}
-                if 'target_chat_id' not in sh_columns:
-                    connection.execute(text(
-                        "ALTER TABLE summary_history ADD COLUMN target_chat_id VARCHAR DEFAULT NULL"
-                    ))
-                    logging.info("已添加 summary_history.target_chat_id 列")
-                if 'source_count' not in sh_columns:
-                    connection.execute(text(
-                        "ALTER TABLE summary_history ADD COLUMN source_count INTEGER DEFAULT NULL"
-                    ))
-                    logging.info("已添加 summary_history.source_count 列")
-                # rule_id 改为可空（PostgreSQL）
-                if engine.name == 'postgresql':
-                    try:
-                        connection.execute(text(
-                            "ALTER TABLE summary_history ALTER COLUMN rule_id DROP NOT NULL"
-                        ))
-                        logging.info("已将 summary_history.rule_id 改为可空")
-                    except Exception:
-                        pass  # 已经是可空则忽略
-
-            # 如果summary_history表不存在，创建表
-            if 'summary_history' not in existing_tables:
-                logging.info("创建summary_history表...")
-                SummaryHistory.__table__.create(engine)
 
             # 如果rule_syncs表不存在，创建表
             if 'rule_syncs' not in existing_tables:
@@ -501,16 +508,12 @@ def migrate_db(engine):
         'is_ai': 'ALTER TABLE forward_rules ADD COLUMN is_ai BOOLEAN DEFAULT FALSE',
         'ai_model': 'ALTER TABLE forward_rules ADD COLUMN ai_model VARCHAR DEFAULT NULL',
         'ai_prompt': 'ALTER TABLE forward_rules ADD COLUMN ai_prompt VARCHAR DEFAULT NULL',
-        'is_summary': 'ALTER TABLE forward_rules ADD COLUMN is_summary BOOLEAN DEFAULT FALSE',
-        'summary_time': 'ALTER TABLE forward_rules ADD COLUMN summary_time VARCHAR DEFAULT "07:00"',
-        'summary_prompt': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt VARCHAR DEFAULT NULL',
         'is_delete_original': 'ALTER TABLE forward_rules ADD COLUMN is_delete_original BOOLEAN DEFAULT FALSE',
         'is_original_sender': 'ALTER TABLE forward_rules ADD COLUMN is_original_sender BOOLEAN DEFAULT FALSE',
         'is_original_time': 'ALTER TABLE forward_rules ADD COLUMN is_original_time BOOLEAN DEFAULT FALSE',
         'is_keyword_after_ai': 'ALTER TABLE forward_rules ADD COLUMN is_keyword_after_ai BOOLEAN DEFAULT FALSE',
         'add_mode': 'ALTER TABLE forward_rules ADD COLUMN add_mode VARCHAR DEFAULT "BLACKLIST"',
         'enable_rule': 'ALTER TABLE forward_rules ADD COLUMN enable_rule BOOLEAN DEFAULT TRUE',
-        'is_top_summary': 'ALTER TABLE forward_rules ADD COLUMN is_top_summary BOOLEAN DEFAULT TRUE',
         'is_filter_user_info': 'ALTER TABLE forward_rules ADD COLUMN is_filter_user_info BOOLEAN DEFAULT FALSE',
         'enable_delay': 'ALTER TABLE forward_rules ADD COLUMN enable_delay BOOLEAN DEFAULT FALSE',
         'delay_seconds': 'ALTER TABLE forward_rules ADD COLUMN delay_seconds INTEGER DEFAULT 5',
@@ -535,8 +538,6 @@ def migrate_db(engine):
         'enable_ai_upload_image': 'ALTER TABLE forward_rules ADD COLUMN enable_ai_upload_image BOOLEAN DEFAULT FALSE',
         'enable_forward': 'ALTER TABLE forward_rules ADD COLUMN enable_forward BOOLEAN DEFAULT TRUE',
         'enable_collect': 'ALTER TABLE forward_rules ADD COLUMN enable_collect BOOLEAN NOT NULL DEFAULT FALSE',
-        'summary_prompt_b': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt_b VARCHAR DEFAULT NULL',
-        'summary_prompt_d': 'ALTER TABLE forward_rules ADD COLUMN summary_prompt_d VARCHAR DEFAULT NULL',
     }
 
     keywords_new_columns = {
@@ -630,7 +631,7 @@ def migrate_db(engine):
             logging.error(f'更新唯一约束时出错: {str(e)}')
 
 
-def init_db():
+def init_db(allow_legacy=False):
     """初始化数据库"""
     DATABASE_URL = os.getenv('DATABASE_URL')
     if not DATABASE_URL:
@@ -648,9 +649,15 @@ def init_db():
     columns = {c['name'] for c in inspect(engine).get_columns('alpha_job')}
     with engine.begin() as connection:
         for name, definition in [('publish_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE'),
-                                 ('target_id', "VARCHAR DEFAULT ''")]:
+                                 ('target_id', "VARCHAR DEFAULT ''"),
+                                 ('schedule_hours', "JSON NOT NULL DEFAULT '[7, 13, 19, 22]'")]:
             if name not in columns:
                 connection.execute(text(f'ALTER TABLE alpha_job ADD COLUMN {name} {definition}'))
+
+    if 'analysis_until' not in {c['name'] for c in inspect(engine).get_columns('ai_job')}:
+        with engine.begin() as connection:
+            connection.execute(text('ALTER TABLE ai_job ADD COLUMN analysis_until TIMESTAMP'))
+            connection.execute(text('UPDATE ai_job SET analysis_until = last_run'))
 
     columns = {c['name'] for c in inspect(engine).get_columns('alpha_events')}
     with engine.begin() as connection:
@@ -658,6 +665,11 @@ def init_db():
             if name not in columns:
                 connection.execute(text(f'ALTER TABLE alpha_events ADD COLUMN {name} {definition}'))
 
+    from models.p19_migration import migrate_business_data
+    migrate_business_data(engine)
+    if not allow_legacy and 'analysis_status' in {c['name'] for c in inspect(engine).get_columns('collected_messages')}:
+        engine.dispose()
+        raise RuntimeError('请停止应用并先运行 scripts/migrate_p19.py --backup 绝对新备份路径 --finalize')
     return engine
 
 @lru_cache(maxsize=8)

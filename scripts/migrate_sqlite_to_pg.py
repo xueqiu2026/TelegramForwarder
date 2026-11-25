@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker
 from models.models import (
     Base, Chat, ForwardRule, Keyword, ReplaceRule, MediaTypes,
     MediaExtensions, RuleSync, PushConfig, RSSConfig, RSSPattern,
-    User, SummaryHistory
+    User
 )
 
 SQLITE_URL = 'sqlite:///./db/forward.db'
@@ -42,7 +42,6 @@ TABLES = [
     ('push_configs', PushConfig),
     ('rss_configs', RSSConfig),
     ('rss_patterns', RSSPattern),
-    ('summary_history', SummaryHistory),
 ]
 
 def migrate():

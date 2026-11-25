@@ -21,6 +21,7 @@ interface Opportunity {
 interface Status {
   publish_enabled: boolean
   target_id: string
+  schedule_hours: number[]
   enabled: boolean
   model: string
   status: string
@@ -72,7 +73,7 @@ export default function AlphaPage() {
   return <div style={{ display: 'grid', gap: 18 }}>
     <div className="card-glass" style={{ padding: 24 }}>
       <h2 style={{ marginTop: 0 }}>机会草稿</h2>
-      <p>持续采集，按北京时间 07:00、13:00、19:00、22:00 处理。主清单要求最近 36 小时内至少两个不同来源。{data.publish_enabled ? '符合要求的内容自动推送到 2026。' : '自动推送关闭。'}</p>
+      <p>持续采集，按北京时间 {data.schedule_hours.map(h => String(h).padStart(2, '0') + ':00').join('、')} 处理。主清单要求最近 36 小时内至少两个不同来源。{data.publish_enabled ? '符合要求的内容自动推送到 2026。' : '自动推送关闭。'}</p>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <label>分析模型：<select value={model} onChange={e => setModel(e.target.value)}>
           <option value="">请选择</option>

@@ -14,7 +14,6 @@ from filters.init_filter import InitFilter
 from filters.reply_filter import ReplyFilter
 from filters.rss_filter import RSSFilter
 from filters.push_filter import PushFilter
-from filters.message_log_filter import MessageLogFilter
 logger = logging.getLogger(__name__)
 
 async def process_forward_rule(client, event, chat_id, rule):
@@ -69,7 +68,6 @@ async def process_forward_rule(client, event, chat_id, rule):
     filter_chain.add_filter(SenderFilter())
     
     # 添加消息落库过滤器（发送成功后记录到数据库）
-    filter_chain.add_filter(MessageLogFilter())
     
     # 添加回复过滤器（处理媒体组消息的评论区按钮）
     filter_chain.add_filter(ReplyFilter())

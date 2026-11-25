@@ -60,10 +60,10 @@ async def consolidate_events(db, model, now, ask):
                     other.draft_usage = {**(other.draft_usage or {}), 'merged_into': primary.id}
                 member_ids = {e.id for e in members}
                 for row in rows:
-                    if not row or not row.analysis:
+                    if not row or not row.alpha.analysis:
                         continue
                     items, merged = [], None
-                    for item in row.analysis.get('events', []):
+                    for item in row.alpha.analysis.get('events', []):
                         if item.get('event_id') in member_ids:
                             if merged is None:
                                 merged = {**item, 'event_id': primary.id, 'project': primary.project,
@@ -73,7 +73,7 @@ async def consolidate_events(db, model, now, ask):
                                 merged['evidence'] += '\n' + item.get('evidence', '')
                         else:
                             items.append(item)
-                    row.analysis = {**row.analysis, 'events': items}
+                    row.alpha.analysis = {**row.alpha.analysis, 'events': items}
             else:
                 primary.draft_usage = {**(primary.draft_usage or {}), 'consolidation_checked': signature}
         db.commit()
