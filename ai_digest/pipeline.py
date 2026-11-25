@@ -361,7 +361,12 @@ async def run_pipeline(client=None, model=None, ask=None, now=None, slot=None, p
             config = job(db)
             delivered = await publish(db, publisher or client, config, model, now, ask,
                                       read_client=client if publisher is not None else None)
-            errors = db.query(AIProcessing).filter_by(status='failed').count()
+            error_query = db.query(AIProcessing).join(CollectedMessage).filter(
+                AIProcessing.status == 'failed', CollectedMessage.source_id.in_(active),
+                CollectedMessage.published_at <= now)
+            if lower is not None:
+                error_query = error_query.filter(CollectedMessage.published_at > lower)
+            errors = error_query.count()
             config.status = 'partial' if failures or errors or delivered['errors'] or delivered['unknown'] else 'success'
             config.result = {'recovery_errors': failures, 'analysis_errors': errors, 'publish': delivered,
                              'analysis_batch': {'mode': 'incremental',

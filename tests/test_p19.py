@@ -146,10 +146,12 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         self.db.expire_all()
         self.assertEqual(self.db.get(AIProcessing, 1).status, 'failed')
         self.store(2, body='Dahl AI API new account grant, use weekly.', date=NOW + timedelta(hours=1))
-        await run_pipeline(model='fixture', ask=self.ask, now=NOW + timedelta(hours=6))
+        result = await run_pipeline(model='fixture', ask=self.ask, now=NOW + timedelta(hours=6))
         self.db.expire_all()
         self.assertEqual(self.db.get(AIProcessing, 1).status, 'failed')
         self.assertEqual(self.db.get(AIProcessing, 2).status, 'candidate')
+        self.assertEqual(result['analysis_errors'], 0)
+        self.assertEqual(job(self.db).status, 'success')
         self.assertEqual([m['id'] for m in self.calls[0][1]['messages']], [2])
         self.assertEqual(len(self.calls), 1)
 
