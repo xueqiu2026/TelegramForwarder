@@ -73,6 +73,8 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         return raw
 
     async def ask(self, model, prompt, data):
+        # JSON mode requires an explicit JSON instruction even when inputs lack it.
+        self.assertIn('json', prompt.lower())
         self.calls.append((prompt, data))
         if prompt == SUPPLEMENT:
             return {'decisions': [{'id': m['id'], 'include': False, 'reason': 'non AI'} for m in data['messages']]}, {'total_tokens': 2}
