@@ -25,7 +25,6 @@ export interface RuleListItem {
   target_chat_name: string
   enable_rule: boolean
   enable_forward: boolean
-  enable_collect: boolean
   is_ai: boolean
 }
 
@@ -48,7 +47,6 @@ export interface RuleDetail {
   add_mode: AddMode
   enable_rule: boolean
   enable_forward: boolean
-  enable_collect: boolean
   handle_mode: HandleMode
   enable_comment_button: boolean
   // AI

@@ -9,7 +9,7 @@ from pydantic import BaseModel, StrictBool, StrictInt, field_validator
 from .auth import get_current_user
 from .console import require_auth
 from models.models import (get_session, BusinessSource, CollectedMessage, AIProcessing, AIItem, AIPublication)
-from collection import sync_sources, EXCLUDED_SOURCES
+from collection import EXCLUDED_SOURCES
 from alpha.storage import source_id
 from alpha.scheduler import latest_slot, TZ
 from ai_digest.pipeline import job
@@ -18,7 +18,8 @@ router = APIRouter(prefix='/api/ai-digest')
 
 
 class Config(BaseModel):
-    enabled: StrictBool
+    model_config = {'extra': 'forbid'}
+    enabled: StrictBool | None = None
     schedule_hours: list[StrictInt] | None = None
 
     @field_validator('schedule_hours')
@@ -27,9 +28,9 @@ class Config(BaseModel):
         if value is not None and (not value or any(h < 0 or h > 23 for h in value) or len(set(value)) != len(value)):
             raise ValueError('时刻必须为不重复的0–23整数小时')
         return sorted(value) if value is not None else None
-    model: str
-    publish_enabled: StrictBool
-    target_id: str = '@wanshenmeAI'
+    model: str | None = None
+    publish_enabled: StrictBool | None = None
+    target_id: str | None = None
 
 
 class Subscription(BaseModel):
@@ -44,12 +45,14 @@ def status(user=Depends(get_current_user)):
     db = get_session()
     try:
         config = job(db)
+        from source_catalog import source_names
+        names = source_names(db)
         data = {'enabled': config.enabled, 'model': config.model or '', 'publish_enabled': config.publish_enabled,
                 'target_id': config.target_id, 'status': config.status, 'error': config.error,
                 'last_run': config.last_run, 'analysis_until': config.analysis_until, 'result': config.result,
                 'schedule_hours': config.schedule_hours, 'times': [f'{h:02d}:00' for h in config.schedule_hours], 'sources': [], 'messages': [], 'items': [], 'publications': []}
         for sub in db.query(BusinessSource).filter_by(business='ai'):
-            data['sources'].append({'id': sub.source_id, 'name': sub.name, 'active': sub.active})
+            data['sources'].append({'id': sub.source_id, 'name': names.get(sub.source_id, sub.name), 'active': sub.active})
         for raw, processed in db.query(CollectedMessage, AIProcessing).join(AIProcessing).order_by(CollectedMessage.published_at.desc()):
             data['messages'].append({'id': raw.id, 'source': raw.source_name, 'date': raw.published_at,
                 'body': raw.body, 'entities': raw.entities, 'url': raw.source_url, 'revision': raw.revision,
@@ -75,17 +78,22 @@ def configure(data: Config, user=Depends(get_current_user)):
     db = get_session()
     try:
         config = job(db)
-        activating = (data.enabled and not config.enabled) or (data.publish_enabled and not config.publish_enabled)
-        if (data.enabled or data.publish_enabled) and data.model not in load_ai_models() and (activating or data.model != config.model):
+        changes = data.model_dump(exclude_unset=True)
+        if any(value is None for value in changes.values()):
+            raise HTTPException(400, '配置字段不能为null')
+        enabled = changes.get('enabled', config.enabled)
+        publishing = changes.get('publish_enabled', config.publish_enabled)
+        model = changes.get('model', config.model)
+        activating = (enabled and not config.enabled) or (publishing and not config.publish_enabled)
+        if (enabled or publishing) and model not in load_ai_models() and (activating or model != config.model):
             raise HTTPException(400, '请选择已配置模型')
-        if data.target_id != '@wanshenmeAI':
+        if changes.get('target_id', config.target_id) != '@wanshenmeAI':
             raise HTTPException(400, '本阶段AI目标为@wanshenmeAI')
-        if data.schedule_hours is not None:
-            config.schedule_hours = data.schedule_hours
-        if (data.enabled and not config.enabled) or data.schedule_hours is not None:
-            config.last_slot = latest_slot(datetime.now(TZ), config.schedule_hours)
-        config.enabled, config.model = data.enabled, data.model
-        config.publish_enabled, config.target_id = data.publish_enabled, data.target_id
+        hours = changes.get('schedule_hours', config.schedule_hours)
+        if (enabled and not config.enabled) or hours != config.schedule_hours:
+            config.last_slot = latest_slot(datetime.now(TZ), hours)
+        for field, value in changes.items():
+            setattr(config, field, value)
         db.commit()
         return {'status': 'success'}
     finally:
@@ -102,14 +110,11 @@ def subscribe(data: Subscription, user=Depends(get_current_user)):
         raise HTTPException(400, '该来源已明确停用')
     db = get_session()
     try:
-        sync_sources(db)
-        sub = db.get(BusinessSource, ('ai', sid))
-        if sub is None:
-            sub = BusinessSource(business='ai', source_id=sid)
-            db.add(sub)
-        sub.name, sub.active = data.name, data.active
-        db.flush()
-        sync_sources(db)
+        from source_catalog import set_subscription
+        try:
+            set_subscription(db, sid, 'ai', data.active)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         db.commit()
         return {'status': 'success'}
     finally:

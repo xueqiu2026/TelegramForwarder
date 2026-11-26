@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Rss, Settings, Cpu, Activity, LogOut, Key, X, Send } from 'lucide-react'
 import './App.css'
+import './ios.css'
 
 import { authApi } from './api'
 import LoginPage from './pages/LoginPage'
@@ -9,8 +10,10 @@ import RssPage from './pages/RssPage'
 import AiSandboxPage from './pages/AiSandboxPage'
 import MonitorPage from './pages/MonitorPage'
 import TgPage from './pages/TgPage'
-import AlphaPage from './pages/AlphaPage'
-import AiDigestPage from './pages/AiDigestPage'
+import BusinessPage from './pages/BusinessPage'
+import type { Business } from './consoleTypes'
+import useSWR from 'swr'
+import { fetcher } from './api'
 
 type TabId = 'rss' | 'rules' | 'ai' | 'monitor' | 'tg' | 'alpha' | 'ai-digest'
 
@@ -21,19 +24,21 @@ interface TabDef {
 }
 
 const TABS: TabDef[] = [
-  { id: 'rules', label: '规则设置', icon: <Settings size={16} /> },
-  { id: 'tg', label: 'TG 管理', icon: <Send size={16} /> },
-  { id: 'ai-digest', label: 'AI内容', icon: <Cpu size={16} /> },
-  { id: 'alpha', label: '机会草稿', icon: <Cpu size={16} /> },
-  { id: 'rss', label: 'RSS 管理', icon: <Rss size={16} /> },
-  { id: 'ai', label: 'AI 沙盒', icon: <Cpu size={16} /> },
-  { id: 'monitor', label: '运维监控', icon: <Activity size={16} /> },
+  { id: 'tg', label: 'TG管理', icon: <Send size={16} /> },
+  { id: 'rules', label: '直转规则', icon: <Settings size={16} /> },
+  { id: 'rss', label: 'RSS管理', icon: <Rss size={16} /> },
+  { id: 'ai', label: 'AI沙盒', icon: <Cpu size={16} /> },
+  { id: 'monitor', label: '运维', icon: <Activity size={16} /> },
 ]
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('rules')
+  const [activeTab, setActiveTab] = useState<TabId>('tg')
   const [user, setUser] = useState<string | null>(null)
   const [checking, setChecking] = useState(true)
+  const { data: businesses = [] } = useSWR<Business[]>(user ? '/businesses' : null, fetcher)
+  const tabs = [TABS[0], ...businesses.map(b => ({id:b.path as TabId,label:b.name,icon:<Cpu size={16}/> })), ...TABS.slice(1)]
+  const [ruleSource, setRuleSource] = useState<number | null>(null)
+  const { data: health } = useSWR<{status:string}>(user ? '/health' : null, fetcher, {refreshInterval:30000})
 
   // 修改密码弹窗状态
   const [showPwdModal, setShowPwdModal] = useState(false)
@@ -67,11 +72,7 @@ export default function App() {
     setPwdError(null)
     setPwdSuccess(null)
     try {
-      const fd = new FormData()
-      fd.append('current_password', oldPwd)
-      fd.append('new_password', newPwd)
-      fd.append('confirm_password', confirmPwd)
-      const res = await authApi.changePassword(fd)
+      const res = await authApi.changePassword({current_password:oldPwd,new_password:newPwd,confirm_password:confirmPwd})
       if (res.success) {
         setPwdSuccess('密码修改成功')
         setOldPwd('')
@@ -85,7 +86,7 @@ export default function App() {
         setPwdError(res.message || '密码修改失败')
       }
     } catch (err: any) {
-      setPwdError(err?.response?.data?.message || err.message || '请求异常')
+      setPwdError(err?.response?.data?.detail || err.message || '请求异常')
     } finally {
       setPwdLoading(false)
     }
@@ -123,11 +124,11 @@ export default function App() {
         </div>
 
         <nav className="nav-links">
-          {TABS.map(tab => (
+          {tabs.map(tab => (
             <button
               key={tab.id}
               className={`nav-item ${activeTab === tab.id ? 'active' : ''}`}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => {if(tab.id==='rules')setRuleSource(null);setActiveTab(tab.id)}}
             >
               {tab.icon}
               {tab.label}
@@ -136,7 +137,7 @@ export default function App() {
         </nav>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div className="health-dot active" />
+          <span className={`health-dot ${health?.status === 'healthy' ? 'active' : 'warning'}`} title={health?.status === 'healthy' ? '服务连接正常' : '连接异常或待核对'} />
           <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{user}</span>
           <button
             onClick={() => setShowPwdModal(true)}
@@ -167,10 +168,9 @@ export default function App() {
 
       {/* ── 主内容区 ───────────────────────────────── */}
       <main className="main-content">
-        {activeTab === 'rules' && <RulesPage />}
-        {activeTab === 'tg' && <TgPage />}
-        {activeTab === 'alpha' && <AlphaPage />}
-        {activeTab === 'ai-digest' && <AiDigestPage />}
+        {activeTab === 'rules' && <RulesPage sourceChatId={ruleSource} />}
+        {activeTab === 'tg' && <TgPage onRules={id => {setRuleSource(id);setActiveTab('rules')}} />}
+        {businesses.map(b => activeTab === b.path && <BusinessPage key={b.key} business={b} />)}
         {activeTab === 'rss' && <RssPage />}
         {activeTab === 'ai' && <AiSandboxPage />}
         {activeTab === 'monitor' && <MonitorPage />}

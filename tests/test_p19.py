@@ -470,7 +470,7 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
             async def get_messages(self, peer, **kwargs):
                 if isinstance(peer, InputPeerChannel):
                     return [SimpleNamespace(message='Dahl新用户注册可获1亿Token的API试用额度。',
-                        id=99, date=NOW.replace(tzinfo=timezone.utc))]
+                        id=99, date=datetime.now(timezone.utc) + timedelta(seconds=1))]
                 return []
         bot, user = Bot(), Reader()
         await run_pipeline(client=user, publisher=bot, model='fixture', ask=self.ask, now=NOW)

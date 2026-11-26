@@ -119,7 +119,7 @@ const TABS = [
   { id: 'push', label: '推送' },
 ] as const
 
-export default function RulesPage() {
+export default function RulesPage({ sourceChatId: filterSourceChatId }: {sourceChatId:number|null}) {
   const { data: rules } = useSWR<RuleListItem[]>('/rules', fetcher)
   const { data: chats } = useSWR<ChatDetail[]>('/chats', fetcher)
   const { data: defaultModelData } = useSWR<{ default_model: string }>('/ai-default-model', fetcher)
@@ -326,13 +326,13 @@ export default function RulesPage() {
       {/* ── 左侧: 规则列表 ─────────────────── */}
       <div className="card-glass" style={{ width: 300, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid var(--border-light)', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>转发规则 <span className="badge badge-primary" style={{ marginLeft: 6 }}>{rules?.length ?? 0}</span></span>
-          <button 
-            onClick={openCreateDialog} 
-            style={{ 
-              background: 'none', border: 'none', color: 'var(--color-primary)', 
-              display: 'flex', alignItems: 'center', gap: 4, padding: 0, 
-              fontSize: 12, fontWeight: 600, cursor: 'pointer' 
+          <span>直转规则 <span className="badge badge-primary" style={{ marginLeft: 6 }}>{rules?.length ?? 0}</span></span>
+          <button
+            onClick={openCreateDialog}
+            style={{
+              background: 'none', border: 'none', color: 'var(--color-primary)',
+              display: 'flex', alignItems: 'center', gap: 4, padding: 0,
+              fontSize: 12, fontWeight: 600, cursor: 'pointer'
             }}
           >
             <Plus size={14} /> 新建
@@ -341,7 +341,7 @@ export default function RulesPage() {
         <div style={{ flex: 1, overflow: 'auto' }}>
           {!rules ? (
             <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</div>
-          ) : rules.map(r => (
+          ) : rules.filter(r => !filterSourceChatId || r.source_chat_id === filterSourceChatId).map(r => (
             <div
               key={r.id}
               onClick={() => setSelectedId(r.id)}
@@ -353,7 +353,7 @@ export default function RulesPage() {
                 transition: 'var(--transition-fast)',
               }}
             >
-              <div className={`health-dot ${r.enable_rule ? 'active' : 'danger'}`} />
+              <div className={`health-dot ${r.enable_rule && r.enable_forward ? 'active' : 'danger'}`} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {r.source_chat_name}
@@ -472,7 +472,7 @@ export default function RulesPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
                   <FormSwitch
                     label="启用转发规则"
-                    description="开启后当前映射转发规则正式生效；关闭则暂停转发"
+                    description="该规则参与处理；是否直发还受即时直发、输出模式和过滤条件控制"
                     checked={detail.enable_rule}
                     onCheckedChange={val => saveField('enable_rule', val)}
                   />
@@ -482,12 +482,7 @@ export default function RulesPage() {
                     checked={detail.enable_forward}
                     onCheckedChange={val => saveField('enable_forward', val)}
                   />
-                  <FormSwitch
-                    label="采集机会原文"
-                    description="管理此来源的Alpha采集订阅；AI来源在AI内容页面独立管理，共享同一原文库。"
-                    checked={detail.enable_collect}
-                    onCheckedChange={val => saveField('enable_collect', val)}
-                  />
+
                   <FormSwitch
                     label="使用 Bot 转发"
                     description="启用官方 Telegram Bot 进行推送；关闭则使用 Userbot 直接发送"
@@ -539,7 +534,7 @@ export default function RulesPage() {
             {activeTab === 'message' && (
               <div className="card-glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
                 <h3 style={sectionTitle}>消息格式排版与开关</h3>
-                
+
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                   <div>
                     <label style={labelStyle}>{ENUM_OPTIONS.message_mode.label}</label>
@@ -611,7 +606,7 @@ export default function RulesPage() {
                     background: 'var(--bg-base)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-light)'
                   }}>
                     <h4 style={{ margin: 0, fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>自定义输出模板格式</h4>
-                    
+
                     {detail.is_original_sender && (
                       <div>
                         <label style={labelStyle}>用户信息模板</label>
@@ -654,7 +649,7 @@ export default function RulesPage() {
             {activeTab === 'ai' && (
               <div className="card-glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
                 <h3 style={sectionTitle}>AI 语言模型处理</h3>
-                
+
                 <FormSwitch
                   label="开启 AI 智能处理"
                   description="启用后每条消息在转发前均会提交给选定的 AI 大模型处理加工"
@@ -684,7 +679,7 @@ export default function RulesPage() {
                           ))}
                         </select>
                       </div>
-                      
+
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         <FormSwitch
                           label="AI 处理后再过滤关键字"
@@ -720,7 +715,7 @@ export default function RulesPage() {
             {/* Tab 4: 过滤规则 */}
             {activeTab === 'filter' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                
+
                 {/* 关键字管理 */}
                 <div className="card-glass" style={{ padding: 20 }}>
                   <h3 style={sectionTitle}>
@@ -737,7 +732,7 @@ export default function RulesPage() {
                     ))}
                     {keywords.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>暂无过滤关键字</div>}
                   </div>
-                  
+
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 8, background: 'var(--bg-surface-hover)', borderRadius: 'var(--radius-sm)' }}>
                     <input
                       value={newKw.keyword}
@@ -772,7 +767,7 @@ export default function RulesPage() {
                     ))}
                     {replaceRules.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>暂无替换规则</div>}
                   </div>
-                  
+
                   <div style={{ display: 'flex', gap: 8, padding: 8, background: 'var(--bg-surface-hover)', borderRadius: 'var(--radius-sm)' }}>
                     <input value={newRR.pattern} onChange={e => setNewRR(prev => ({ ...prev, pattern: e.target.value }))} placeholder="匹配正则 (如 @[a-zA-Z0-9_]+)" style={{ ...inputStyle, flex: 1 }} />
                     <input value={newRR.content} onChange={e => setNewRR(prev => ({ ...prev, content: e.target.value }))} placeholder="替换为 (留空代表直接删除匹配内容)" style={{ ...inputStyle, flex: 1 }} />
@@ -785,7 +780,7 @@ export default function RulesPage() {
             {/* Tab 5: 推送 */}
             {activeTab === 'push' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                
+
                 {/* 推送控制与通道管理 */}
                 <div className="card-glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <h3 style={sectionTitle}>Apprise 第三方外部推送</h3>

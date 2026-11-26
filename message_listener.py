@@ -138,6 +138,10 @@ async def handle_user_message(event, user_client, bot_client):
         
         if not source_chat:
             return
+        from source_catalog import source_blocked
+        if source_chat.peer_id and source_blocked(session, source_chat.peer_id):
+            logger.info('来源已退出或停用，保留规则配置但阻断实时转发')
+            return
             
         # 添加日志：查询转发规则
         logger.info(f'找到源聊天: {source_chat.name} (ID: {source_chat.id})')

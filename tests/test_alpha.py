@@ -992,13 +992,16 @@ class AlphaTests(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         app.include_router(alpha_router)
         app.include_router(console_router)
+        from rss.app.routes.catalog import router as catalog_router
+        app.include_router(catalog_router)
         app.dependency_overrides[get_current_user] = lambda: None
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
             self.assertEqual((await client.get('/api/alpha/status')).status_code, 401)
             app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(username='test')
             self.assertEqual((await client.get('/api/alpha/status')).status_code, 200)
             self.assertEqual((await client.put('/api/rules/1', json={'enable_collect': 'true'})).status_code, 400)
-            self.assertEqual((await client.put('/api/rules/1', json={'enable_collect': False})).status_code, 200)
+            self.assertEqual((await client.put('/api/rules/1', json={'enable_collect': False})).status_code, 400)
+            self.assertEqual((await client.put('/api/sources/1/subscriptions/alpha', json={'active': False})).status_code, 200)
             detail = (await client.get('/api/rules/1')).json()
             self.assertFalse(detail['enable_collect'])
             self.assertFalse(detail['enable_forward'])

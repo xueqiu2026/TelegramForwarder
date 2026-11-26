@@ -30,6 +30,32 @@ ENUM_MAP = {
     "handle_mode": HandleMode,
 }
 
+from pydantic import BaseModel
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
+
+
+@router.post('/auth/change-password')
+async def change_password(data: PasswordChange, user=Depends(get_current_user)):
+    require_auth(user)
+    if not data.new_password or data.new_password != data.confirm_password:
+        raise HTTPException(400, '新密码不能为空，且两次输入必须一致')
+    from models.db_operations import DBOperations
+    ops = DBOperations()
+    db = get_session()
+    try:
+        if not await ops.verify_user(db, user.username, data.current_password):
+            raise HTTPException(400, '当前密码错误')
+        await ops.update_user_password(db, user.username, data.new_password)
+        return {'success': True}
+    finally:
+        db.close()
+
+
 # ── 鉴权守卫 (BUG-02) ──────────────────────────────────────────────
 def require_auth(user):
     """所有受保护端点统一调用，未登录直接抛 401"""
@@ -122,39 +148,40 @@ manager = ConnectionManager()
 # BUG-14: 使用 logging handler 配置的日志路径，而非硬编码
 async def log_generator():
     """从本地日志文件中读取并推送到 WebSocket"""
-    # 尝试常见的日志文件路径
-    log_candidates = [
-        "temp/forwarder.log",
-        "logs/forwarder.log",
-    ]
-    log_file = None
-    for candidate in log_candidates:
-        if os.path.exists(candidate):
-            log_file = candidate
-            break
-
-    if not log_file:
-        # 创建默认日志文件
-        os.makedirs("temp", exist_ok=True)
-        log_file = "temp/forwarder.log"
-        with open(log_file, "w", encoding="utf-8") as f:
-            f.write("System Log Stream initialized.\n")
-
-    try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-            # 先输出最后 50 行历史日志
-            lines = f.readlines()
-            for line in lines[-50:]:
+    log_file = os.getenv('CONSOLE_LOG_FILE', '')
+    if log_file:
+        if not os.path.isfile(log_file):
+            yield '配置的日志文件不存在，未创建空日志。'
+            return
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as stream:
+            from collections import deque
+            for line in deque(stream, maxlen=50):
                 yield line
-            # 然后 tail -f 模式
             while True:
-                line = f.readline()
-                if not line:
+                line = stream.readline()
+                if line:
+                    yield line
+                else:
                     await asyncio.sleep(1)
-                    continue
-                yield line
-    except Exception as e:
-        logger.error(f"WebSocket 日志流生成出错: {e}")
+    else:
+        import httpx
+        cursor = None
+        port = int(os.getenv('INTERNAL_BRIDGE_PORT', '8001'))
+        async with httpx.AsyncClient(trust_env=False) as client:
+            while True:
+                try:
+                    response = await client.get(f'http://127.0.0.1:{port}/logs', params={'cursor': cursor} if cursor else {}, timeout=8)
+                    if response.status_code != 200:
+                        yield '服务日志不可用：' + response.json().get('message', '主进程日志读取失败')
+                        return
+                    data = response.json()
+                    for line in data['lines']:
+                        yield line
+                    cursor = data['cursor']
+                except httpx.HTTPError:
+                    yield '服务日志不可用：主进程桥接未连接。'
+                    return
+                await asyncio.sleep(2)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -211,6 +238,9 @@ def delete_chat(id: int, user=Depends(get_current_user)):
         chat = db.query(Chat).filter(Chat.id == id).first()
         if not chat:
             raise HTTPException(status_code=404, detail="Chat 记录不存在")
+        from models.models import BusinessSource
+        if chat.peer_id and db.query(BusinessSource).filter_by(source_id=chat.peer_id, active=True).first():
+            raise HTTPException(400, '该来源仍有业务订阅，请先在TG管理停用')
         if db.query(ForwardRule).filter(ForwardRule.target_chat_id == id).first():
             raise HTTPException(status_code=400, detail="该群组仍是转发目标，请先修改或删除指向它的规则")
         rules = db.query(ForwardRule).filter(ForwardRule.source_chat_id == id).all()
@@ -258,19 +288,18 @@ async def resolve_chat(data: Dict, user=Depends(get_current_user)):
     try:
         telegram_chat_id = res_data.get("telegram_chat_id")
         name = res_data.get("name")
+        peer = res_data.get('peer_id')
         
-        chat = db.query(Chat).filter(Chat.telegram_chat_id == telegram_chat_id).first()
+        chat = db.query(Chat).filter(Chat.peer_id == peer).first() if peer else None
+        chat = chat or db.query(Chat).filter(Chat.telegram_chat_id == telegram_chat_id).first()
         if not chat:
             chat = Chat(telegram_chat_id=telegram_chat_id, name=name)
             db.add(chat)
             db.commit()
             db.refresh(chat)
-        else:
-            # 如果名称有变化，进行同步更新
-            if chat.name != name:
-                chat.name = name
-                db.commit()
-                db.refresh(chat)
+        chat.peer_id, chat.peer_type = peer, res_data.get('peer_type')
+        chat.telegram_title, chat.username = name, res_data.get('username')
+        db.commit()
                 
         return {
             "status": "success",
@@ -453,6 +482,8 @@ def get_rule_detail(id: int, user=Depends(get_current_user)):
 @router.put("/rules/{id}")
 def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
     require_auth(user)
+    if 'enable_collect' in data:
+        raise HTTPException(400, '业务订阅请在TG管理修改，直转规则不再写入enable_collect')
     db = get_session()
     try:
         r = db.query(ForwardRule).filter(ForwardRule.id == id).first()
@@ -468,12 +499,10 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
             "enable_comment_button", "is_ai", "ai_model", "ai_prompt",
             "enable_ai_upload_image",
             "is_keyword_after_ai", "enable_push", "enable_only_push",
-            "only_rss", "enable_sync", "enable_forward", "enable_collect"
+            "only_rss", "enable_sync", "enable_forward"
         ]:
             if field in data:
                 val = data[field]
-                if field == 'enable_collect' and type(val) is not bool:
-                    raise HTTPException(status_code=400, detail='enable_collect 必须为布尔值')
                 # 枚举字段需要从字符串转为枚举实例
                 if field in ENUM_MAP and isinstance(val, str):
                     try:
@@ -489,21 +518,6 @@ def update_rule(id: int, data: Dict, user=Depends(get_current_user)):
                             )
                 setattr(r, field, val)
 
-        from alpha.storage import sync_sources
-        sync_sources(db)
-        if 'enable_collect' in data:
-            from models.models import BusinessSource
-            from collection import sync_sources
-            from alpha.storage import source_id
-            sync_sources(db)
-            sid = source_id(r.source_chat.telegram_chat_id)
-            sub = db.get(BusinessSource, ('alpha', sid))
-            if sub is None:
-                sub = BusinessSource(business='alpha', source_id=sid, name=r.source_chat.name)
-                db.add(sub)
-            sub.active = r.enable_collect
-            db.flush()
-            sync_sources(db)
         db.commit()
         return {"status": "success"}
     except HTTPException:
@@ -1285,12 +1299,32 @@ async def analyze_channels(data: Dict, user=Depends(get_current_user)):
 # ══════════════════════════════════════════════════════════════════════
 @router.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
+    if not await get_current_user(websocket):
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
-    try:
+    async def stream():
         async for log_line in log_generator():
             await websocket.send_text(log_line)
+
+    async def receive():
+        while True:
+            await websocket.receive_text()
+
+    tasks = [asyncio.create_task(stream()), asyncio.create_task(receive())]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        pass
     except Exception as e:
         logger.error(f"WebSocket 连接异常: {e}")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         manager.disconnect(websocket)
+        from starlette.websockets import WebSocketState
+        if websocket.client_state != WebSocketState.DISCONNECTED:
+            await websocket.close()

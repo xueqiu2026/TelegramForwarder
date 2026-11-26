@@ -7,12 +7,10 @@ from message_listener import setup_listeners
 import os
 import asyncio
 import logging
-import uvicorn
 import multiprocessing
 from models.db_operations import DBOperations
 from scheduler.chat_updater import ChatUpdater
 from handlers.bot_handler import send_welcome_message
-from rss.main import app as rss_app  # noqa: used by health check route
 from utils.log_config import setup_logging
 
 # 设置Docker日志的默认配置，如果docker-compose.yml中没有配置日志选项将使用这些值
@@ -103,6 +101,76 @@ async def start_internal_server(user_client, bot_client):
 
     app.router.add_post('/ai-digest-run', run_ai)
     app.on_cleanup.append(cleanup_ai)
+
+    catalog_state = {'status': 'idle'}
+    catalog_task = None
+
+    async def sources_sync(request):
+        nonlocal catalog_task
+        if request.method == 'POST' and not (catalog_task and not catalog_task.done()):
+            import secrets
+            from source_catalog import ensure_catalog, normalize_times, catalog_snapshot
+            from rss.app.routes.catalog import subscription_signature
+            from models.models import get_session, Chat
+            db = get_session()
+            try:
+                ensure_catalog(db)
+                baseline = normalize_times(subscription_signature(db))
+                monitored = {c.peer_id for c in db.query(Chat) if c.peer_id}
+                previous = catalog_snapshot(db)
+                subscriptions = {}
+                from models.models import BusinessSource
+                for sub in db.query(BusinessSource).filter_by(active=True):
+                    subscriptions.setdefault(sub.source_id, []).append(sub.business)
+                db.commit()
+            finally:
+                db.close()
+            catalog_state.clear()
+            catalog_state.update(status='running', token=secrets.token_urlsafe(24), baseline=baseline)
+
+            async def scan():
+                from telegram_catalog import scan_catalog, describe_changes
+                try:
+                    result = await scan_catalog(user_client, monitored)
+                    describe_changes(previous, result)
+                    for row in result['sources']:
+                        row['affected_businesses'] = subscriptions.get(row['peer_id'], []) if row['member_state'] == 'left' else []
+                    catalog_state['result'] = result
+                    catalog_state['status'] = 'ready'
+                except Exception as exc:
+                    catalog_state.update(status='failed', error=type(exc).__name__ + ': ' + str(exc))
+            catalog_task = asyncio.create_task(scan())
+        return web.json_response(catalog_state)
+
+    async def cleanup_catalog(app):
+        if catalog_task and not catalog_task.done():
+            catalog_task.cancel()
+            await asyncio.gather(catalog_task, return_exceptions=True)
+    app.router.add_post('/sources-sync', sources_sync)
+    app.router.add_get('/sources-sync', sources_sync)
+    app.on_cleanup.append(cleanup_catalog)
+
+    async def logs_handler(request):
+        import json
+        args = ['journalctl', '-u', 'telegram-forwarder.service', '--no-pager', '-o', 'json', '-n', '50']
+        if request.query.get('cursor'):
+            args += ['--after-cursor', request.query['cursor']]
+        try:
+            proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                raise RuntimeError('读取服务日志超时')
+            if proc.returncode:
+                raise RuntimeError('无法读取systemd服务日志')
+            records = [json.loads(line) for line in stdout.decode('utf-8', errors='replace').splitlines() if line.strip()]
+            return web.json_response({'lines': [str(r.get('MESSAGE', '')) for r in records],
+                'cursor': records[-1]['__CURSOR'] if records else request.query.get('cursor')})
+        except (OSError, RuntimeError) as exc:
+            return web.json_response({'message': str(exc)}, status=503)
+    app.router.add_get('/logs', logs_handler)
     
     async def resolve_handler(request):
         try:
@@ -119,17 +187,15 @@ async def start_internal_server(user_client, bot_client):
             
             # 使用 user_client 获取实体
             entity = await user_client.get_entity(link_clean)
-            # 1. 在内存 MessageBox 中注册状态，防止 Telethon 底层丢包
-            user_client._message_box.try_set_channel_state(entity.id, 1)
+            from telethon.tl.types import Channel
+            if isinstance(entity, Channel) and not getattr(entity, 'left', False):
+                user_client._message_box.try_set_channel_state(entity.id, 1)
             # 2. 通过 GetChannelDifference 主动建立握手以激活该长连接的实时 updates 推送
             from telethon.tl.functions.updates import GetChannelDifferenceRequest
             from telethon.tl.types import ChannelMessagesFilterEmpty
-            await user_client(GetChannelDifferenceRequest(
-                channel=entity,
-                filter=ChannelMessagesFilterEmpty(),
-                pts=1,
-                limit=10
-            ))
+            if isinstance(entity, Channel) and not getattr(entity, 'left', False):
+                await user_client(GetChannelDifferenceRequest(
+                    channel=entity, filter=ChannelMessagesFilterEmpty(), pts=1, limit=10))
             
             # 获取最合适的展示名
             if hasattr(entity, 'title'):
@@ -142,6 +208,9 @@ async def start_internal_server(user_client, bot_client):
             return web.json_response({
                 "status": "success",
                 "telegram_chat_id": str(entity.id),
+                "peer_id": str(utils.get_peer_id(entity)),
+                "peer_type": 'channel' if isinstance(entity, Channel) else 'group' if isinstance(entity, types.Chat) else 'user',
+                "username": getattr(entity, 'username', None),
                 "name": title
             })
         except Exception as e:
@@ -221,17 +290,19 @@ async def start_message_poller(user_client, bot_client, source_ids):
     async def poll_loop():
         from message_listener import handle_user_message
         while True:
-            from models.models import get_session, BusinessSource
+            from models.models import get_session
+            from source_catalog import effective_sources
             db = get_session()
             try:
-                dynamic = {s.source_id: s.name for s in db.query(BusinessSource).filter_by(active=True)}
+                dynamic = effective_sources(db)
+                db.commit()
             finally:
                 db.close()
             # 动态获取当前 MessageBox 中已激活的频道
             mb_map = getattr(user_client._message_box, 'map', {})
             # 只轮询那些【不在】MessageBox 中的源频道
             poll_targets = [
-                (chat_id_str, name) for chat_id_str, name in {**dict(source_ids), **dynamic}.items()
+                (chat_id_str, name) for chat_id_str, name in dynamic.items()
                 if utils.resolve_id(int(chat_id_str))[0] not in mb_map
             ]
             
@@ -320,18 +391,21 @@ async def start_clients():
             logger.info(f'已加载 {len(dialogs)} 个对话, MessageBox: {mb_after_dialogs}')
 
             # 2. 从数据库获取所有转发规则的源频道 ID
-            from models.models import get_session as get_db_session, Chat, ForwardRule
+            from models.models import get_session as get_db_session, Chat
             db_session = get_db_session()
             try:
-                source_chats = db_session.query(Chat.telegram_chat_id, Chat.name).join(
-                    ForwardRule, Chat.id == ForwardRule.source_chat_id
-                ).filter(ForwardRule.enable_rule == True).distinct().all()
-                from collection import sync_sources, source_id
-                sync_sources(db_session)
+                from source_catalog import effective_sources
+                from telegram_catalog import peer_record
+                for dialog in dialogs:
+                    record = peer_record(dialog.entity, 'left' if getattr(dialog.entity, 'left', False) else 'joined')
+                    chat = db_session.query(Chat).filter(Chat.telegram_chat_id.in_([record['entity_id'], record['peer_id'], record['peer_id'].lstrip('-')])).first()
+                    if chat and not db_session.query(Chat).filter(Chat.peer_id == record['peer_id'], Chat.id != chat.id).first():
+                        for field in ('peer_id', 'peer_type', 'telegram_title', 'username', 'member_state'):
+                            setattr(chat, field, record[field])
+                        from datetime import datetime
+                        chat.verified_at = datetime.utcnow()
+                source_ids = list(effective_sources(db_session).items())
                 db_session.commit()
-                from models.models import BusinessSource
-                source_ids = list({**{source_id(c.telegram_chat_id): c.name for c in source_chats},
-                                   **{s.source_id: s.name for s in db_session.query(BusinessSource).filter_by(active=True)}}.items())
             finally:
                 db_session.close()
 
@@ -359,16 +433,10 @@ async def start_clients():
                 try:
                     entity = await user_client.get_entity(cid)
                     if hasattr(entity, 'access_hash') and entity.access_hash:
-                        # 自动 Join 未加入的频道
+                        # Membership changes require explicit action; startup never rejoins a departed source.
                         if getattr(entity, 'left', False):
-                            try:
-                                logger.info(f'检测到账号未加入源频道，正在自动加入: {name} ({chat_id_str})')
-                                from telethon.tl.functions.channels import JoinChannelRequest
-                                await user_client(JoinChannelRequest(entity))
-                                logger.info(f'成功加入源频道: {name}')
-                                await asyncio.sleep(1.0)
-                            except Exception as je:
-                                logger.warning(f'自动加入频道失败: {name} ({chat_id_str}), 错误: {je}')
+                            logger.warning(f'源频道已退出，不自动重新加入: {name} ({chat_id_str})')
+                            continue
 
                         user_client._mb_entity_cache.extend([], [entity])
                         real_pts = session_pts_map.get(channel_id, 1)

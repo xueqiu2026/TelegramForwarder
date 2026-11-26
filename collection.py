@@ -113,14 +113,15 @@ def save_message(db, sid, name, username, message):
                     state.status, state.result, state.error = 'pending', None, None
         row.revision += 1
     else:
-        row = CollectedMessage(source_id=sid, message_id=message.id)
+        row = CollectedMessage(source_id=sid, message_id=message.id, received_at=datetime.utcnow())
         db.add(row)
     row.source_name, row.username = name, username or ''
     row.published_at = utc(message.date)
     row.edited_at = utc(message.edit_date) if message.edit_date else None
     row.body, row.entities, row.media = body, entities, media
     row.grouped_id, row.reply_id = grouped, message.reply_to_msg_id
-    row.source_url = (f'https://t.me/{username}/{message.id}' if username else f'https://t.me/c/{sid[4:]}/{message.id}')
+    row.source_url = (f'https://t.me/{username}/{message.id}' if username else
+                      f'https://t.me/c/{sid[4:]}/{message.id}' if sid.startswith('-100') else '')
     row.content_hash = content_hash
     db.flush()
     enroll_processing(db, row)
@@ -138,6 +139,9 @@ async def collect_event(event):
     db = get_session()
     try:
         sync_sources(db)
+        from source_catalog import source_blocked
+        if source_blocked(db, sid):
+            return
         state = db.get(AlphaCollectionState, sid)
         if state and state.active and utc(event.message.date) >= state.enabled_at:
             save_message(db, sid, getattr(entity, 'title', ''), getattr(entity, 'username', ''), event.message)
@@ -159,7 +163,9 @@ async def _recover_history(client):
     try:
         sync_sources(db)
         db.commit()
-        sources = [s.source_id for s in db.query(AlphaCollectionState).filter_by(active=True)]
+        from source_catalog import source_blocked
+        sources = [s.source_id for s in db.query(AlphaCollectionState).filter_by(active=True)
+                   if not source_blocked(db, s.source_id)]
     finally:
         db.close()
     failures = {}
@@ -211,9 +217,14 @@ _recovery_lock = asyncio.Lock()
 async def recover_history(client, slot=None):
     # Both business jobs at a slot share the completed recovery result.
     async with _recovery_lock:
-        if slot is not None and getattr(client, '_collection_slot', None) == slot:
+        db = get_session()
+        try:
+            signature = tuple(sorted((s.business, s.source_id, s.active) for s in db.query(BusinessSource)))
+        finally:
+            db.close()
+        if slot is not None and getattr(client, '_collection_slot', None) == (slot, signature):
             return getattr(client, '_collection_result', {})
         result = await _recover_history(client)
         if slot is not None:
-            client._collection_slot, client._collection_result = slot, result
+            client._collection_slot, client._collection_result = (slot, signature), result
         return result

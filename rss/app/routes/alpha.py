@@ -15,7 +15,9 @@ router = APIRouter(prefix='/api/alpha')
 
 
 class Config(BaseModel):
-    enabled: StrictBool
+    model_config = {'extra': 'forbid'}
+    enabled: StrictBool | None = None
+    publish_enabled: StrictBool | None = None
     schedule_hours: list[StrictInt] | None = None
 
     @field_validator('schedule_hours')
@@ -24,7 +26,7 @@ class Config(BaseModel):
         if value is not None and (not value or any(h < 0 or h > 23 for h in value) or len(set(value)) != len(value)):
             raise ValueError('时刻必须为不重复的0–23整数小时')
         return sorted(value) if value is not None else None
-    model: str
+    model: str | None = None
 
 
 @router.get('/status')
@@ -43,19 +45,24 @@ def status(user=Depends(get_current_user)):
 def configure(data: Config, user=Depends(get_current_user)):
     require_auth(user)
     from utils.settings import load_ai_models
-    if data.enabled and not data.model:
-        raise HTTPException(400, '启用任务前请选择模型')
     db = get_session()
     try:
         config = job(db)
-        if data.model and data.model not in load_ai_models() and (data.enabled or data.model != config.model):
+        changes = data.model_dump(exclude_unset=True)
+        if any(value is None for value in changes.values()):
+            raise HTTPException(400, '配置字段不能为null')
+        enabled = changes.get('enabled', config.enabled)
+        model = changes.get('model', config.model)
+        if enabled and not model:
+            raise HTTPException(400, '启用任务前请选择模型')
+        if model and model not in load_ai_models() and (model != config.model or enabled and not config.enabled):
             raise HTTPException(400, '请选择已配置模型')
-        if data.schedule_hours is not None:
-            config.schedule_hours = data.schedule_hours
-        if (data.enabled and not config.enabled) or data.schedule_hours is not None:
+        hours = changes.get('schedule_hours', config.schedule_hours)
+        if (enabled and not config.enabled) or hours != config.schedule_hours:
             # Enabling is not an immediate AI call; first scheduled time is the next slot.
-            config.last_slot = latest_slot(datetime.now(TZ), config.schedule_hours)
-        config.enabled, config.model = data.enabled, data.model
+            config.last_slot = latest_slot(datetime.now(TZ), hours)
+        for field, value in changes.items():
+            setattr(config, field, value)
         db.commit()
         return {'status': 'success', 'publish': 'enabled' if config.publish_enabled else 'none'}
     finally:

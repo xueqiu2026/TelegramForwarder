@@ -6,23 +6,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/api/ws': {
-        target: 'ws://localhost:8000',
-        ws: true,
-      },
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/ws': {
-        target: 'ws://localhost:8000',
-        ws: true,
-      },
-      // 保持原有 Jinja2 页面可用
-      '/rss': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
+      '/tg/api/ws': { target: 'ws://localhost:8000', ws: true, rewrite: path => path.replace(/^\/tg/, '') },
+      '/tg/api': { target: 'http://localhost:8000', changeOrigin: true, rewrite: path => path.replace(/^\/tg/, '') },
+      '/tg/rss': { target: 'http://localhost:8000', changeOrigin: true, rewrite: path => path.replace(/^\/tg/, '') },
     }
   }
 })

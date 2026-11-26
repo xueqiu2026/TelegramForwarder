@@ -19,10 +19,29 @@ class Chat(Base):
     telegram_chat_id = Column(String, unique=True, nullable=False)
     name = Column(String, nullable=True)
     current_add_id = Column(String, nullable=True)
+    peer_id = Column(String, unique=True)
+    peer_type = Column(String)
+    telegram_title = Column(String)
+    username = Column(String)
+    member_state = Column(String, default='unknown')
+    verified_at = Column(DateTime)
 
     # 关系
     source_rules = relationship('ForwardRule', foreign_keys='ForwardRule.source_chat_id', back_populates='source_chat')
     target_rules = relationship('ForwardRule', foreign_keys='ForwardRule.target_chat_id', back_populates='target_chat')
+
+class TelegramFolder(Base):
+    __tablename__ = 'telegram_folders'
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    complete = Column(Boolean, default=True, nullable=False)
+
+
+class TelegramFolderSource(Base):
+    __tablename__ = 'telegram_folder_sources'
+    folder_id = Column(Integer, ForeignKey('telegram_folders.id'), primary_key=True)
+    peer_id = Column(String, primary_key=True)
+
 
 class ForwardRule(Base):
     __tablename__ = 'forward_rules'
@@ -103,6 +122,7 @@ class CollectedMessage(Base):
     username = Column(String, default='')
     published_at = Column(DateTime, nullable=False, index=True)
     edited_at = Column(DateTime)
+    received_at = Column(DateTime)
     body = Column(String, default='')
     entities = Column(JSON, default=list)
     media = Column(JSON, default=dict)
@@ -646,6 +666,8 @@ def init_db(allow_legacy=False):
 
     # 然后进行必要的迁移
     migrate_db(engine)
+    from models.p20_migration import migrate_catalog
+    migrate_catalog(engine)
     columns = {c['name'] for c in inspect(engine).get_columns('alpha_job')}
     with engine.begin() as connection:
         for name, definition in [('publish_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE'),

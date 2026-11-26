@@ -42,13 +42,18 @@ def snapshot(now=None):
         from collection import business_sources
         active = business_sources(db, 'alpha', enabled_only=False)
         states = db.query(AlphaCollectionState).filter(AlphaCollectionState.source_id.in_(active)).all()
+        from models.models import BusinessSource
+        subscriptions = {s.source_id: s for s in db.query(BusinessSource).filter_by(business='alpha')}
+        from source_catalog import source_names
+        names = source_names(db)
         counts = {}
         for status, in db.query(AlphaProcessing.analysis_status).join(CollectedMessage).filter(CollectedMessage.source_id.in_(active)).all():
             counts[status] = counts.get(status, 0) + 1
         result = {'publish_enabled': config.publish_enabled, 'target_id': config.target_id, 'enabled': config.enabled, 'schedule_hours': config.schedule_hours, 'model': config.model or '', 'status': config.status,
                   'last_run': config.last_run.isoformat() if config.last_run else None,
                   'error': config.error, 'result': config.result or {}, 'counts': counts,
-                  'sources': [{'id': s.source_id, 'active': s.active, 'error': s.error,
+                  'sources': [{'id': s.source_id, 'active': subscriptions[s.source_id].active,
+                               'name': names.get(s.source_id, subscriptions[s.source_id].name), 'collection_enabled': s.active, 'error': s.error,
                                'scanned_id': s.scanned_id} for s in states], 'events': []}
         for ev in db.query(AlphaEvent).order_by(AlphaEvent.first_seen, AlphaEvent.id):
             result['events'].append({'id': ev.id, 'project': ev.project, 'title': ev.title,

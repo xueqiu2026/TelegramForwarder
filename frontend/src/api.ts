@@ -22,8 +22,8 @@ export const authApi = {
     api.post('/auth/login', { username, password }).then(r => r.data),
   logout: () => api.post('/auth/logout').then(r => r.data),
   me: () => api.get('/auth/me').then(r => r.data),
-  changePassword: (data: FormData) =>
-    axios.post('/tg/rss/change_password', data, { withCredentials: true }).then(r => r.data),
+  changePassword: (data: {current_password:string;new_password:string;confirm_password:string}) =>
+    api.post('/auth/change-password', data).then(r => r.data),
 }
 
 // ── Chat ──────────────────────────────────────────────────
