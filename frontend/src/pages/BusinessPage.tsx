@@ -21,6 +21,7 @@ function Detail({ business, id }: { business: Business; id: number }) {
   return <div className="content-detail">
     <p className="muted">{business.key==='alpha'?`判型状态：${stateNames[data.type_status||'']||data.type_status||'未知'} · 信息密度：${stateNames[data.detail_level||'']||data.detail_level||'未知'}`:`参与条件：${data.conditions||'未记录'}`}</p>
     <p className="muted">截止时间 · 北京时间：{formatTime(data.deadline)}</p>
+    {business.key==='ai'&&data.dedup&&<p className="muted">去重判定：{({new:'独立新事项',same:'同一事项',distinct:'不同资格或技术方法',update:'实质更新',review:'待核对'} as Record<string,string>)[data.dedup.relation||'']||'待核对'}{(data.dedup.blocked_by_item_id||data.dedup.related_item_id)?` · 关联事项 #${data.dedup.blocked_by_item_id||data.dedup.related_item_id}`:''} · {data.dedup.blocked_reason||data.dedup.reason}{data.dedup.change&&` · 新增事实：${data.dedup.change}`}</p>}
     <h3>当前中文内容</h3><div className="copy-body">{data.draft_zh || data.output_zh || '当前没有中文稿。已发正文见下方回执。'}</div>
     {data.error && <p role="alert">{data.error}</p>}
     <h3>发布回执</h3>{!data.publications?.length && <p className="muted">暂无发布记录。</p>}

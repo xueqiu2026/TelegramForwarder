@@ -40,6 +40,7 @@ export interface ContentItem {
   type_status?: string | null; detail_level?: string | null; deadline?: string | null
   source_count?: number; draft_zh?: string | null; output_zh?: string | null; error: string | null
   publications?: Publication[]; originals?: Original[]
+  dedup?: {relation?: string; related_item_id?: number | null; reason?: string; change?: string; blocked_by_item_id?: number | null; blocked_reason?: string} | null
   publication_summaries?: {id:number;target_id:string;status:string}[]
 }
 export function formatTime(value: string | null | undefined) {

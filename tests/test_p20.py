@@ -100,7 +100,8 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
             self.db.add(cls(id=1,enabled=True,model='kept',publish_enabled=True,last_slot='preserve'))
         self.db.commit()
         for path,cls in [('alpha',AlphaJob),('ai-digest',AIJob)]:
-            response = await self.client.put(f'/api/{path}/config',json={'schedule_hours':[7,13,19,22]})
+            hours = self.db.get(cls,1).schedule_hours
+            response = await self.client.put(f'/api/{path}/config',json={'schedule_hours':hours})
             self.assertEqual(response.status_code,200,response.text)
             self.db.expire_all()
             config = self.db.get(cls,1)

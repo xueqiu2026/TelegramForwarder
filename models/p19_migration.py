@@ -3,6 +3,18 @@ from sqlalchemy import MetaData, Table, inspect, select
 from models.models import AlphaProcessing, BusinessMigration
 
 
+def migrate_ai_dedup(engine):
+    from sqlalchemy import text
+    from models.models import AIJob
+    with engine.begin() as connection:
+        if 'dedup' not in {c['name'] for c in inspect(connection).get_columns('ai_items')}:
+            connection.execute(text('ALTER TABLE ai_items ADD COLUMN dedup JSON'))
+        marker = 'p19-ai-three-hour-v1'
+        if not connection.execute(select(BusinessMigration.name).where(BusinessMigration.name == marker)).first():
+            connection.execute(AIJob.__table__.update().values(schedule_hours=[1, 4, 7, 10, 13, 16, 19, 22]))
+            connection.execute(BusinessMigration.__table__.insert().values(name=marker))
+
+
 def migrate_business_data(engine):
     columns = {c['name'] for c in inspect(engine).get_columns('collected_messages')}
     if 'analysis_status' not in columns:

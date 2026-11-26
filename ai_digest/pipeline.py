@@ -11,6 +11,8 @@ from alpha.public_copy import validate_public_copy
 from ai_digest.keywords import recall
 from ai_digest.prompts import VERSION, OUTPUT_VERSION, CATEGORIES, ANALYZE, OUTPUT, SUPPLEMENT
 from utils.settings import get_default_ai_model
+from ai_digest.dedup import (validate_relations, publication_context, record_checks,
+                             allow_output, canonical_item, item_facts, publication_facts, reservations)
 
 
 def job(db):
@@ -69,6 +71,7 @@ def validate(data, rows, candidates):
                 if not isinstance(key, str) or not key or (key in new_keys and new_keys[key] != identity):
                     raise ValueError('新事项标识错误或冲突')
                 new_keys[key] = identity
+    validate_relations(decisions, candidates)
     return decisions
 
 
@@ -81,21 +84,35 @@ def selected_message(row, excerpt):
     return {**message_data(row), 'body': excerpt, 'entities': entities}
 
 
-def apply(db, decisions, version, usage):
+def apply(db, decisions, version, usage, checked=False):
     new = {}
+    items = [item for decision in decisions for item in decision['items']]
+    # Resolve same-batch links even when the referenced source appears later in the batch.
+    for item in sorted(items, key=lambda i: i['dedup']['relation'] == 'same'):
+        if item.get('item_id') is None and item['new_key'] not in new:
+            event = AIItem(subject=item['subject'], goal=item['goal'], category=item['category'],
+                           conditions=item.get('conditions', ''), sources=[])
+            db.add(event)
+            db.flush()
+            new[item['new_key']] = event
+    touched = {}
     for decision in decisions:
         raw = db.get(CollectedMessage, decision['id'])
         state = db.get(AIProcessing, raw.id)
         detach_evidence(db, raw.id, 'ai')
         saved = []
         for item in decision['items']:
-            event = db.get(AIItem, item['item_id']) if item.get('item_id') else new.get(item['new_key'])
-            if event is None:
-                event = AIItem(subject=item['subject'], goal=item['goal'], category=item['category'],
-                               conditions=item.get('conditions', ''), sources=[])
-                db.add(event)
-                db.flush()
-                new[item['new_key']] = event
+            event = canonical_item(db, item['item_id']) if item.get('item_id') else new.get(item['new_key'])
+            touched[event.id] = event
+            if checked:
+                relation = dict(item['dedup'])
+                if relation.get('related_new_key'):
+                    relation['related_item_id'] = new[relation['related_new_key']].id
+                if relation.get('related_item_id'):
+                    relation['related_item_id'] = canonical_item(db, relation['related_item_id']).id
+                relation.pop('related_new_key', None)
+                if relation['relation'] != 'same' or not event.dedup:
+                    event.dedup = relation
             duplicate = any(ref['excerpt'] == item['excerpt'] for ref in event.sources or [])
             event.sources = [*(event.sources or []), {'id': raw.id, 'revision': raw.revision,
                 'source_id': raw.source_id, 'date': raw.published_at.isoformat(),
@@ -115,6 +132,7 @@ def apply(db, decisions, version, usage):
         state.status, state.version, state.error = decision['decision'], version, None
         state.revision = raw.revision
         state.usage = {'calls': [*(state.usage or {}).get('calls', []), usage]} if decision is decisions[0] else {'shared_request': decisions[0]['id']}
+    return list(touched.values())
 
 
 async def analyze(db, model, now, ask, lower=None):
@@ -206,26 +224,33 @@ async def analyze(db, model, now, ask, lower=None):
         if not rows:
             continue
         candidates = db.query(AIItem).all()
+        candidate_facts = {i.id: item_facts(i) for i in candidates}
         revisions = {r.id: r.revision for r in [*rows, *(p[0] for p in copies)]}
-        incoming_text = '\n'.join(r.body for r in rows).casefold()
         context = [{'id': i.id, 'subject': i.subject, 'goal': i.goal, 'category': i.category,
                     'conditions': i.conditions, 'status': i.status,
-                    **({'evidence': i.sources} if i.subject.casefold() in incoming_text else {})} for i in candidates]
+                    'evidence': i.sources, 'dedup': {k: (i.dedup or {}).get(k)
+                                                   for k in ('relation', 'related_item_id', 'reason', 'change')}} for i in candidates]
+        target = job(db).target_id
+        receipt_stamps = {str(p.id): publication_facts(p) for p in reservations(db, target)}
         usage = None
         try:
             result, usage = await ask(model, ANALYZE, {'now': now.isoformat() + 'Z',
+                'publication_history': publication_context(db, target, now),
                 'messages': [{**message_data(r), 'recall': db.get(AIProcessing, r.id).recall,
                               'hints': recall(r.body, r.entities or [])[1]} for r in rows], 'candidates': context})
             decisions = validate(result, rows, {i.id for i in candidates})
             db.expire_all()
             if any(db.get(CollectedMessage, rid).revision != rev for rid, rev in revisions.items()):
                 continue
-            apply(db, decisions, version, usage)
+            if any(item_facts(db.get(AIItem, eid)) != stamp for eid, stamp in candidate_facts.items()):
+                raise ValueError('分类期间历史事项发生变化，保留原文待核对')
+            touched = apply(db, decisions, version, usage, checked=True)
             for copied, representative in copies:
                 saved = db.get(AIProcessing, representative.id)
                 decision = json.loads(json.dumps(saved.result))
                 decision['id'] = copied.id
                 apply(db, [decision], version, {'reused_from': representative.id})
+            record_checks(db, touched, target, set(candidate_facts) | {i.id for i in touched}, receipt_stamps)
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -282,13 +307,31 @@ async def publish(db, client, config, model, now, ask, read_client=None):
             messages.append(selected_message(raw, ref['excerpt']))
         if not rows:
             continue
-        signature = digest([sorted({digest([m['body'], m['entities']]) for m in messages}), OUTPUT_VERSION, model])
+        if sent and any(p['status'] in {'sending', 'unknown'} for p in sent.parts):
+            # Reconcile the saved body without generating again or requiring legacy dedup metadata.
+            try:
+                outcome = await deliver(db, client, config, sent, peer, sent.draft_hash,
+                                        ''.join(p['text'] for p in sent.parts), read_client=read_client)
+                for key in result:
+                    result[key] += outcome[key]
+            except Exception as exc:
+                db.rollback()
+                item.error = str(exc)
+                db.commit()
+                result['errors'] += 1
+            continue
+        if not allow_output(db, item, config.target_id):
+            continue
+        update = ({'related_item_id': item.dedup.get('related_item_id'), 'change': item.dedup['change']}
+                  if item.dedup.get('relation') == 'update' else None)
+        signature_data = [sorted({digest([m['body'], m['entities']]) for m in messages}), OUTPUT_VERSION, model]
+        signature = digest(signature_data + [update] if update else signature_data)
         usage, usage_recorded = None, False
         try:
             if item.output_hash != signature or not item.output_zh:
                 expected = list(item.sources)
                 response, usage = await ask(model, OUTPUT, {'now': now.isoformat() + 'Z', 'subject': item.subject,
-                    'goal': item.goal, 'messages': messages, 'private_sources': [
+                    'goal': item.goal, 'messages': messages, 'update': update, 'private_sources': [
                         {'name': r.source_name, 'username': r.username, 'url': r.source_url} for r in rows]})
                 item.output_usage = {'calls': [*(item.output_usage or {}).get('calls', []), usage]}
                 db.commit()
@@ -314,6 +357,11 @@ async def publish(db, client, config, model, now, ask, read_client=None):
             validate_copy(item.output_zh, rows)
             db.refresh(item)
             if item.status != 'candidate' or (item.deadline and item.deadline <= max(now, datetime.utcnow())):
+                continue
+            if not allow_output(db, item, config.target_id):
+                continue
+            sent = db.query(AIPublication).filter_by(item_id=item.id, target_id=config.target_id).first()
+            if sent and (sent.status == 'sent' or any(p['status'] in {'sending', 'unknown'} for p in sent.parts)):
                 continue
             if sent is None:
                 sent = AIPublication(item_id=item.id, target_id=config.target_id, draft_hash=item.output_hash,

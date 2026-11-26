@@ -61,7 +61,7 @@ def status(user=Depends(get_current_user)):
         for item in db.query(AIItem).order_by(AIItem.created_at.desc()):
             data['items'].append({'id': item.id, 'subject': item.subject, 'goal': item.goal,
                 'category': item.category, 'conditions': item.conditions, 'status': item.status,
-                'sources': item.sources, 'output_zh': item.output_zh, 'error': item.error})
+                'sources': item.sources, 'output_zh': item.output_zh, 'error': item.error, 'dedup': item.dedup})
         for sent in db.query(AIPublication):
             data['publications'].append({'item_id': sent.item_id, 'target_id': sent.target_id,
                 'status': sent.status, 'parts': sent.parts, 'sources': sent.sources, 'error': sent.error})

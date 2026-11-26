@@ -189,6 +189,7 @@ class AIItem(Base):
     output_version = Column(String)
     output_usage = Column(JSON, default=dict)
     error = Column(String)
+    dedup = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
 
 
@@ -196,7 +197,7 @@ class AIJob(Base):
     __tablename__ = 'ai_job'
     id = Column(Integer, primary_key=True)
     enabled = Column(Boolean, default=False, nullable=False)
-    schedule_hours = Column(JSON, default=lambda: [7, 13, 19, 22], nullable=False)
+    schedule_hours = Column(JSON, default=lambda: [1, 4, 7, 10, 13, 16, 19, 22], nullable=False)
     model = Column(String, default='')
     publish_enabled = Column(Boolean, default=False, nullable=False)
     target_id = Column(String, default='@wanshenmeAI')
@@ -689,6 +690,8 @@ def init_db(allow_legacy=False):
 
     from models.p19_migration import migrate_business_data
     migrate_business_data(engine)
+    from models.p19_migration import migrate_ai_dedup
+    migrate_ai_dedup(engine)
     if not allow_legacy and 'analysis_status' in {c['name'] for c in inspect(engine).get_columns('collected_messages')}:
         engine.dispose()
         raise RuntimeError('请停止应用并先运行 scripts/migrate_p19.py --backup 绝对新备份路径 --finalize')

@@ -83,7 +83,9 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
             return {'decisions': [{'id': m['id'], 'decision': 'candidate', 'reason': 'explicit API grant',
                 'items': [{'item_id': existing, 'new_key': 'dahl-grant', 'subject': 'Dahl',
                     'goal': 'new account credit grant', 'category': 'B1', 'conditions': 'new account',
-                    'excerpt': m['body'], 'status': 'candidate', 'deadline_utc': None, 'missing': []}]}
+                    'excerpt': m['body'], 'status': 'candidate', 'deadline_utc': None, 'missing': [],
+                    'dedup': {'relation': 'same' if existing else 'new', 'related_item_id': existing,
+                              'related_new_key': None, 'reason': 'same grant' if existing else 'new grant', 'change': ''}}]}
                 for m in data['messages']]}, {'total_tokens': 10}
         return {'text': 'Dahl新用户注册可获1亿Token的API试用额度。', 'blocked': False}, {'total_tokens': 5}
 
@@ -213,7 +215,9 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
             return {'id': raw.id, 'decision': 'candidate', 'reason': 'fixture', 'items': [{
                 'item_id': eid, 'new_key': 'dahl', 'subject': 'Dahl', 'goal': 'grant', 'category': 'B1',
                 'conditions': 'new account', 'excerpt': raw.body, 'status': 'candidate',
-                'deadline_utc': limit, 'missing': missing}]}
+                'deadline_utc': limit, 'missing': missing,
+                'dedup': {'relation': 'same' if eid else 'new', 'related_item_id': eid,
+                          'related_new_key': None, 'reason': 'same grant' if eid else 'new grant', 'change': ''}}]}
         apply(self.db, [decision(raws[0], None, ['eligibility conflict'], '2026-11-25T00:00:00Z')], 'fixture', {})
         item = self.db.query(AIItem).one()
         apply(self.db, [decision(raws[1], item.id, [], None)], 'fixture', {})
@@ -359,6 +363,315 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.query(AIItem).count(), 2)
         self.assertEqual({i.conditions for i in self.db.query(AIItem)}, {'Linux', 'Windows'})
 
+    async def test_same_batch_different_keys_and_aliases_merge_before_output(self):
+        self.store(body='Dahl AI API grants new accounts 100 million tokens.')
+        self.db.add(BusinessSource(business='ai',source_id='-1002234567890',enabled_at=NOW-timedelta(days=7)))
+        sync_sources(self.db)
+        save_message(self.db,'-1002234567890','Second source','second',incoming(2,body='达尔 AI API 新用户赠送一亿 tokens。'))
+        self.db.commit()
+        async def aliases(model, prompt, data):
+            result, usage = await self.ask(model, prompt, data)
+            if prompt == ANALYZE:
+                first, second = [d['items'][0] for d in result['decisions']]
+                first['new_key'] = 'english'
+                second.update(new_key='chinese', subject='达尔')
+                second['dedup'].update(relation='same', related_new_key='english', reason='same offer in Chinese')
+            return result, usage
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        client = Client()
+        await run_pipeline(client=client, model='fixture', ask=aliases, now=NOW)
+        self.db.expire_all()
+        self.assertEqual((self.db.query(AIItem).count(), len(client.sent)), (1, 1))
+        self.assertEqual(len(self.db.query(AIItem).one().sources), 2)
+        self.assertEqual(sum(p == OUTPUT for p, _ in self.calls), 1)
+
+    async def test_cross_batch_and_midnight_duplicates_keep_sent_snapshot(self):
+        from ai_digest.dedup import day_bounds
+        self.store(date=NOW-timedelta(minutes=1))
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        client = Client()
+        await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW)
+        receipt = self.db.query(AIPublication).one()
+        receipt.created_at = datetime(2026, 11, 26, 15, 59)  # Beijing 23:59
+        original_parts = json.loads(json.dumps(receipt.parts))
+        self.db.query(AIItem).one().output_zh = 'Changed current draft must never replace published evidence'
+        self.db.commit()
+        for index, hour in enumerate((9, 16), start=2):
+            self.store(index, body=f'Dahl AI API 新用户一亿 tokens，其他频道转载 {index}', date=NOW.replace(hour=hour))
+            # Deliberately leave item_id null: the independent semantic relation must still merge it.
+            async def cross_id(model, prompt, data):
+                result, usage = await self.ask(model, prompt, data)
+                if prompt == ANALYZE:
+                    history = data['publication_history']
+                    self.assertEqual(history[0]['parts'][0]['text'], original_parts[0]['text'])
+                    for d in result['decisions']:
+                        d['items'][0]['item_id'] = None
+                return result, usage
+            await run_pipeline(client=client, model='fixture', ask=cross_id, now=NOW.replace(hour=hour)+timedelta(minutes=1))
+        self.db.expire_all()
+        self.assertEqual((len(client.sent), self.db.query(AIItem).count()), (1, 1))
+        self.assertEqual(self.db.query(AIPublication).one().parts, original_parts)
+        self.assertEqual(sum(p == OUTPUT for p, _ in self.calls), 1)
+        self.assertFalse(self.calls[-1][1]['publication_history'][0]['created_today'])
+        self.assertEqual(day_bounds(datetime(2026, 11, 26, 16)),
+                         (datetime(2026, 11, 26, 16), datetime(2026, 11, 27, 16)))
+
+    async def test_cross_id_exact_fragment_collision_blocks_generation(self):
+        raw = self.store()
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        client = Client()
+        await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW)
+        original = self.db.query(AIItem).one()
+        duplicate = AIItem(subject='another spelling', goal='same grant', category='B1',
+                           status='candidate', sources=list(original.sources), dedup=dict(original.dedup))
+        self.db.add(duplicate)
+        self.db.commit()
+        count = len(self.calls)
+        await publish(self.db, client, config, 'fixture', NOW, self.ask)
+        self.db.refresh(duplicate)
+        self.assertEqual((len(self.calls), len(client.sent)), (count, 1))
+        self.assertEqual(duplicate.status, 'needs_info')
+        self.assertEqual(duplicate.dedup['blocked_by_item_id'], original.id)
+        self.assertIsNone(duplicate.output_zh)
+        self.assertEqual(duplicate.dedup['duplicate_of'], original.id)
+        fresh = self.store(2,body='Dahl AI API welcome grant new account: one hundred million tokens.',date=NOW+timedelta(hours=1))
+        async def points_to_split(model,prompt,data):
+            result,usage = await self.ask(model,prompt,data)
+            if prompt == ANALYZE:
+                for d in result['decisions']:
+                    d['items'][0]['item_id'] = duplicate.id
+                    d['items'][0]['dedup']['related_item_id'] = duplicate.id
+            return result,usage
+        await run_pipeline(client=client,model='fixture',ask=points_to_split,now=NOW+timedelta(hours=3))
+        self.db.expire_all()
+        self.assertEqual(self.db.get(AIProcessing,fresh.id).result['items'][0]['item_id'],original.id)
+        self.assertEqual(len(client.sent),1)
+
+    async def test_distinct_methods_and_real_update_publish_separately(self):
+        self.store(body='Claude API setup for Linux using endpoint A.')
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        client = Client()
+        async def classified(model, prompt, data):
+            result, usage = await self.ask(model, prompt, data)
+            if prompt == SUPPLEMENT:
+                for decision in result['decisions']:
+                    decision['include'] = True
+            elif prompt == ANALYZE:
+                for decision in result['decisions']:
+                    item = decision['items'][0]
+                    item.update(subject='Claude', category='T1', goal=item['excerpt'])
+                    if data['candidates']:
+                        relation = 'update' if 'quota' in item['excerpt'] else 'distinct'
+                        item.update(item_id=None, new_key='change-'+str(decision['id']))
+                        item['dedup'].update(relation=relation, reason='specific platform or quota difference',
+                                             change='quota increased to 200' if relation == 'update' else '')
+            elif prompt == OUTPUT:
+                result['text'] = '适用环境与步骤：' + data['messages'][0]['body']
+            return result, usage
+        await run_pipeline(client=client, model='fixture', ask=classified, now=NOW)
+        self.store(2, body='Claude API setup for Windows using endpoint B.', date=NOW+timedelta(hours=1))
+        await run_pipeline(client=client, model='fixture', ask=classified, now=NOW+timedelta(hours=3))
+        self.store(3, body='Claude API quota increased to 200 for Linux.', date=NOW+timedelta(hours=4))
+        await run_pipeline(client=client, model='fixture', ask=classified, now=NOW+timedelta(hours=6))
+        self.db.expire_all()
+        self.assertEqual((len(client.sent), self.db.query(AIItem).count()), (3, 3))
+        items = self.db.query(AIItem).order_by(AIItem.id).all()
+        self.assertEqual([i.dedup['relation'] for i in items], ['new', 'distinct', 'update'])
+        self.assertEqual(items[-1].dedup['related_item_id'], items[0].id)
+        output = [d for p, d in self.calls if p == OUTPUT][-1]
+        self.assertEqual(output['update']['change'], 'quota increased to 200')
+
+    async def test_same_brand_different_eligibility_does_not_merge(self):
+        self.store(body='Claude AI API credit grant for new users.')
+        self.store(2, body='Claude AI API credit grant for university students.')
+        async def eligibility(model, prompt, data):
+            result, usage = await self.ask(model, prompt, data)
+            if prompt == ANALYZE:
+                first, second = [d['items'][0] for d in result['decisions']]
+                first.update(subject='Claude', new_key='new-users', conditions='new users')
+                second.update(subject='Claude', new_key='students', conditions='university students')
+                second['dedup'].update(relation='distinct', related_new_key='new-users', reason='different eligibility')
+            return result, usage
+        await run_pipeline(model='fixture', ask=eligibility, now=NOW)
+        self.db.expire_all()
+        items = self.db.query(AIItem).order_by(AIItem.id).all()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[1].dedup['related_item_id'], items[0].id)
+
+    async def test_review_or_missing_semantic_decision_cannot_generate(self):
+        self.store()
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        async def review(model, prompt, data):
+            result, usage = await self.ask(model, prompt, data)
+            if prompt == ANALYZE:
+                for d in result['decisions']:
+                    d['decision'] = 'needs_info'
+                    d['items'][0]['status'] = 'needs_info'
+                    d['items'][0]['dedup'].update(relation='review', reason='cannot confirm eligibility')
+            return result, usage
+        client = Client()
+        await run_pipeline(client=client, model='fixture', ask=review, now=NOW)
+        self.assertEqual(client.sent, [])
+        self.assertFalse(any(p == OUTPUT for p, _ in self.calls))
+        self.store(2, body='Dahl AI API new account welcome credits trial.', date=NOW+timedelta(hours=1))
+        async def missing(model, prompt, data):
+            result, usage = await self.ask(model, prompt, data)
+            if prompt == ANALYZE:
+                del result['decisions'][0]['items'][0]['dedup']
+            return result, usage
+        await run_pipeline(client=client, model='fixture', ask=missing, now=NOW+timedelta(hours=3))
+        self.db.expire_all()
+        self.assertEqual(self.db.get(AIProcessing, 2).status, 'failed')
+        self.assertEqual(client.sent, [])
+
+    async def test_same_batch_cyclic_relation_is_rejected(self):
+        from ai_digest.pipeline import validate
+        raw = self.store()
+        result, _ = await self.ask('fixture', ANALYZE, {'messages':[{'id':raw.id,'body':raw.body}], 'candidates':[]})
+        first = result['decisions'][0]['items'][0]
+        second = json.loads(json.dumps(first))
+        first['new_key'], second['new_key'] = 'a', 'b'
+        first['dedup'].update(relation='same', related_new_key='b')
+        second['dedup'].update(relation='same', related_new_key='a')
+        result['decisions'][0]['items'].append(second)
+        with self.assertRaisesRegex(ValueError, '循环'):
+            validate(result, [raw], set())
+
+    async def test_restart_and_empty_batch_use_no_ai_and_do_not_resend(self):
+        self.store()
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        client = Client()
+        await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW)
+        calls = len(self.calls)
+        self.db.close()
+        from models.models import _session_factory
+        _session_factory(self.url).kw['bind'].dispose()
+        _session_factory.cache_clear()
+        self.db = get_session()
+        await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW+timedelta(hours=3))
+        self.assertEqual((len(self.calls),len(client.sent)), (calls,1))
+
+    async def test_unknown_cross_id_reserves_original_before_translation(self):
+        self.store()
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        class LostReceipt(Client):
+            async def __call__(self, request):
+                self.sent.append(request)
+                raise TimeoutError('unknown delivery')
+        client = LostReceipt()
+        await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW)
+        original = self.db.query(AIItem).one()
+        # An existing historical split must not bypass its unknown publication via a fresh ID.
+        self.db.add(AIItem(subject='alias',goal='grant',category='B1',status='candidate',sources=list(original.sources)))
+        self.db.commit()
+        calls = len(self.calls)
+        await run_pipeline(client=client, model='fixture', ask=self.ask, now=NOW+timedelta(hours=3))
+        self.assertEqual((len(self.calls),len(client.sent)), (calls,1))
+        self.assertEqual(self.db.query(AIPublication).one().status, 'unknown')
+
+    async def test_schedule_and_dedup_migration_is_once_and_preserves_boundaries(self):
+        from models.models import init_db
+        from models.p19_migration import migrate_ai_dedup
+        raw = self.store()
+        config = job(self.db)
+        config.schedule_hours = [7,13,19,22]
+        config.last_slot, config.analysis_until = 'kept-slot', NOW
+        self.db.add(AlphaJob(id=1,schedule_hours=[7,13,19,22],last_slot='alpha-kept'))
+        self.db.commit()
+        with self.engine.begin() as connection:
+            connection.execute(text('ALTER TABLE ai_items DROP COLUMN dedup'))
+        migrate_ai_dedup(self.engine)
+        self.db.expire_all()
+        self.assertEqual(job(self.db).schedule_hours, [1,4,7,10,13,16,19,22])
+        self.assertEqual((job(self.db).analysis_until,job(self.db).last_slot), (NOW,'kept-slot'))
+        self.assertEqual(self.db.get(AlphaJob,1).schedule_hours, [7,13,19,22])
+        job(self.db).schedule_hours = [8,20]
+        self.db.commit()
+        initialized = init_db()
+        initialized.dispose()
+        self.db.expire_all()
+        self.assertEqual(job(self.db).schedule_hours, [8,20])
+        self.assertEqual(self.db.get(CollectedMessage,raw.id).body,raw.body)
+
+    async def test_dedup_fields_reach_existing_detail_and_export(self):
+        import httpx
+        from fastapi import FastAPI
+        from rss.app.routes.auth import get_current_user
+        from rss.app.routes.catalog import router as catalog
+        from rss.app.routes.ai_digest import router as ai
+        self.store()
+        await run_pipeline(model='fixture',ask=self.ask,now=NOW)
+        app=FastAPI()
+        app.include_router(catalog);app.include_router(ai)
+        app.dependency_overrides[get_current_user]=lambda:SimpleNamespace(username='fixture')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+            listing=(await client.get('/api/business/ai/items')).json()
+            item_id=listing['items'][0]['id']
+            detail=(await client.get(f'/api/business/ai/items/{item_id}')).json()
+            exported=(await client.get('/api/ai-digest/export')).json()
+            self.assertEqual(detail['dedup']['relation'],'new')
+            self.assertEqual(exported['items'][0]['dedup'],detail['dedup'])
+            self.assertIn('checked_publications',detail['dedup'])
+
+    async def test_shared_background_does_not_block_a_real_update(self):
+        from ai_digest.pipeline import apply
+        from ai_digest.prompts import VERSION
+        from ai_digest.dedup import record_checks,reservations,publication_facts
+        first=self.store()
+        config=job(self.db);config.publish_enabled=True;self.db.commit()
+        client=Client()
+        await run_pipeline(client=client,model='fixture',ask=self.ask,now=NOW)
+        original=self.db.query(AIItem).one()
+        fresh=self.store(2,body='Dahl AI API new account grant increased to 200 million tokens.',date=NOW+timedelta(hours=1))
+        check={'relation':'update','related_item_id':original.id,'related_new_key':None,'reason':'amount changed','change':'grant increased to 200 million'}
+        decisions=[{'id':r.id,'decision':'candidate','reason':'new supported grant amount','items':[{
+            'item_id':None,'new_key':'new-amount','subject':'Dahl','goal':'new grant amount','category':'B1','conditions':'new account',
+            'excerpt':r.body,'status':'candidate','missing':[],'deadline_utc':None,'dedup':dict(check)}]} for r in (first,fresh)]
+        touched=apply(self.db,decisions,VERSION+':fixture',{},checked=True)
+        record_checks(self.db,touched,config.target_id,{original.id,*[i.id for i in touched]},
+                      {str(p.id):publication_facts(p) for p in reservations(self.db,config.target_id)})
+        self.db.commit()
+        await publish(self.db,client,config,'fixture',NOW+timedelta(hours=3),self.ask)
+        self.assertEqual(len(client.sent),2)
+
+    async def test_new_receipt_during_output_is_held_before_actual_send(self):
+        self.store()
+        await run_pipeline(model='fixture', ask=self.ask, now=NOW)
+        config = job(self.db)
+        config.publish_enabled = True
+        self.db.commit()
+        async def intervening(model, prompt, data):
+            result, usage = await self.ask(model,prompt,data)
+            if prompt == OUTPUT:
+                with get_session() as other:
+                    item = AIItem(subject='unknown other',goal='new published facts',category='B1',sources=[])
+                    other.add(item);other.flush()
+                    other.add(AIPublication(item_id=item.id,target_id=config.target_id,draft_hash='other',
+                                           status='sent',parts=[{'text':'other publication','entities':[], 'status':'sent','message_id':999}]))
+                    other.commit()
+            return result, usage
+        client = Client()
+        await publish(self.db,client,config,'fixture',NOW,intervening)
+        self.db.expire_all()
+        self.assertEqual(client.sent, [])
+        item = self.db.query(AIItem).filter_by(subject='Dahl').one()
+        self.assertEqual(item.status,'needs_info')
+        self.assertIn('未比较',item.dedup['blocked_reason'])
+
     async def test_real_web_to_main_bridge_runs_pipeline_and_persists_receipt(self):
         import httpx
         import socket
@@ -485,12 +798,13 @@ class P19Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bot.sent), 1)
         self.assertEqual(len(self.calls), calls)
 
-    async def test_business_schedules_default_equal_and_configure_independently(self):
+    async def test_ai_three_hour_schedule_and_alpha_configure_independently(self):
         from rss.app.routes.ai_digest import configure, Config
         from alpha.storage import job as alpha_job
         from alpha.scheduler import latest_slot, TZ
         user = SimpleNamespace(username='test')
-        self.assertEqual(job(self.db).schedule_hours, alpha_job(self.db).schedule_hours)
+        self.assertEqual(job(self.db).schedule_hours, [1, 4, 7, 10, 13, 16, 19, 22])
+        self.assertEqual(alpha_job(self.db).schedule_hours, [7, 13, 19, 22])
         self.db.commit()
         with patch('utils.settings.load_ai_models', return_value={'fixture': []}):
             configure(Config(enabled=True, model='fixture', publish_enabled=False, schedule_hours=[8, 20]), user)
