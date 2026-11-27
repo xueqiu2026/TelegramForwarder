@@ -42,6 +42,19 @@ class Client:
 
 
 class P19Tests(unittest.IsolatedAsyncioTestCase):
+    def test_ai_service_context_recalls_genuine_grants_without_accepting_non_ai_offers(self):
+        from ai_digest.keywords import recall
+        for body in ('硅基流动首次实名领16元代金券，用于模型调用。',
+                     'SiliconFlow new account welcome credit $10.',
+                     '语音模型服务注册赠送200美元试用额度。'):
+            with self.subTest(body=body):
+                state, categories = recall(body)
+                self.assertEqual(state, 'hit')
+                self.assertTrue({'B1', 'B5'} & set(categories))
+        for body in ('银行卡注册赠送16元代金券。', 'VPS signup $10 credit; free API for server management.'):
+            with self.subTest(body=body):
+                self.assertEqual(recall(body)[0], 'unmatched')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='p19-test-')
         self.url = 'sqlite:///' + str(Path(self.tmp.name) / 'test.db')
